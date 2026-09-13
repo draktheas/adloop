@@ -2354,11 +2354,17 @@ def get_reddit_ad_groups(ad_account_id: str = "", campaign_id: str = "") -> dict
 @mcp.tool(title="Reddit ads", annotations=_READONLY, tags={"reddit"})
 @_safe
 def get_reddit_ads(
-    ad_account_id: str = "", ad_group_id: str = "", campaign_id: str = ""
+    ad_account_id: str = "",
+    ad_group_id: str = "",
+    campaign_id: str = "",
+    include_copy: bool = False,
 ) -> dict:
     """List Reddit ads with status, rejection_reason, post and click URL.
 
-    Insights flag REJECTED ads (policy review) and ads still PENDING_APPROVAL.
+    include_copy=true adds each ad's post: type (TEXT, IMAGE, VIDEO, CAROUSEL),
+    headline, body, destination and media, one request per distinct post, so
+    creative can be reviewed without opening Reddit. Insights flag REJECTED
+    ads (policy review) and ads still PENDING_APPROVAL.
     """
     from adloop.reddit.read import get_reddit_ads as _impl
 
@@ -2367,6 +2373,7 @@ def get_reddit_ads(
         ad_account_id=_reddit_account(ad_account_id),
         ad_group_id=ad_group_id,
         campaign_id=campaign_id,
+        include_copy=include_copy,
     )
 
 
@@ -2702,6 +2709,7 @@ def update_reddit_ad_group(
     platforms: _StrListOpt = None,
     expand_targeting: bool | None = None,
     schedule: _DictListOpt = None,
+    locations: _StrListOpt = None,
 ) -> dict:
     """Draft changes to a Reddit ad group — budget, bid, run dates, weekly schedule, targeting.
 
@@ -2715,6 +2723,7 @@ def update_reddit_ad_group(
     {"start_day": "FRI", "start_hour": 22, "end_day": "SAT", "end_hour": 3}.
     [] clears it (deliver at any time). Hours apply in each viewer's local
     time, not the account time zone.
+    locations: placements, FEED and/or COMMENTS_PAGE (conversation pages).
     """
     from adloop.reddit.write import update_reddit_ad_group as _impl
 
@@ -2742,6 +2751,7 @@ def update_reddit_ad_group(
         platforms=platforms,
         expand_targeting=expand_targeting,
         schedule=schedule,
+        locations=locations,
     )
 
 
@@ -2858,6 +2868,7 @@ def draft_reddit_ad_group(
     start_time: str = "",
     end_time: str = "",
     schedule: _DictListOpt = None,
+    locations: _StrListOpt = None,
 ) -> dict:
     """Draft a new Reddit ad group (created PAUSED) — returns a PREVIEW.
 
@@ -2877,6 +2888,7 @@ def draft_reddit_ad_group(
     {"start_day": "FRI", "start_hour": 22, "end_day": "SAT", "end_hour": 3}.
     Omit for delivery at any time. Hours apply in each viewer's local time,
     not the account time zone.
+    locations: placements, FEED and/or COMMENTS_PAGE (conversation pages).
     """
     from adloop.reddit.write import draft_reddit_ad_group as _impl
 
@@ -2906,6 +2918,7 @@ def draft_reddit_ad_group(
         start_time=start_time,
         end_time=end_time,
         schedule=schedule,
+        locations=locations,
     )
 
 
@@ -2913,9 +2926,9 @@ def draft_reddit_ad_group(
 @_safe
 def draft_reddit_ad(
     ad_group_id: str,
-    profile_id: str,
-    headline: str,
-    click_url: str,
+    profile_id: str = "",
+    headline: str = "",
+    click_url: str = "",
     ad_account_id: str = "",
     ad_name: str = "",
     post_type: str = "TEXT",
@@ -2924,6 +2937,7 @@ def draft_reddit_ad(
     call_to_action: str = "",
     display_url: str = "",
     allow_comments: bool = True,
+    post_id: str = "",
 ) -> dict:
     """Draft a Reddit ad: creates a post on the profile, then the ad (PAUSED) — PREVIEW.
 
@@ -2933,6 +2947,11 @@ def draft_reddit_ad(
     at unverified pages. call_to_action is one of Reddit's fixed labels
     (Learn More, Sign Up, Shop Now, Download, ...). Comments are public on
     Reddit ads; pass allow_comments=false to disable them.
+
+    post_id (t3_...) promotes an EXISTING post instead, keeping its upvotes
+    and comments: no post is created, headline/body/image are ignored, and
+    profile_id defaults to the post's. TEXT posts take no click_url (they
+    open themselves); media posts default click_url to the post's destination.
     """
     from adloop.reddit.write import draft_reddit_ad as _impl
 
@@ -2950,6 +2969,7 @@ def draft_reddit_ad(
         call_to_action=call_to_action,
         display_url=display_url,
         allow_comments=allow_comments,
+        post_id=post_id,
     )
 
 

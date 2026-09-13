@@ -311,6 +311,49 @@ def _ad_group_summary(g: dict) -> dict:
     }
 
 
+_MAX_BODY_CHARS = 600
+_MAX_COPY_FETCHES = 50
+
+
+def _post_summary(p: dict) -> dict:
+    """The copy and destination of a post, as an ad reviewer needs it."""
+    content = p.get("content") or []
+    first = content[0] if content and isinstance(content[0], dict) else {}
+    body = str(p.get("body") or "")
+    return {
+        "post_id": p.get("id"),
+        "type": p.get("type"),
+        "headline": p.get("headline"),
+        "body": body[:_MAX_BODY_CHARS],
+        "body_truncated": len(body) > _MAX_BODY_CHARS,
+        # Where a click goes. Text posts open the post itself; the link,
+        # if any, is in the body.
+        "destination_url": first.get("destination_url"),
+        "display_url": first.get("display_url"),
+        "call_to_action": first.get("call_to_action"),
+        "media_url": first.get("media_url"),
+        "thumbnail_url": p.get("thumbnail_url"),
+        "items": len(content),
+        "allow_comments": p.get("allow_comments"),
+        "post_url": p.get("post_url"),
+        "profile_id": p.get("profile_id"),
+        "created_at": p.get("created_at"),
+    }
+
+
+def get_reddit_post(config: AdLoopConfig, post_id: str) -> dict | None:
+    """One post by id (``t3_...``), raw, or None when Reddit has no such post."""
+    post_id = (post_id or "").strip()
+    if not post_id:
+        return None
+    try:
+        return data_of(reddit_get(config, f"posts/{post_id}")) or None
+    except Exception as exc:
+        if getattr(exc, "status", None) == 404:
+            return None
+        raise
+
+
 def _ad_summary(a: dict) -> dict:
     return {
         "ad_id": a.get("id"),
@@ -516,6 +559,7 @@ def get_reddit_ads(
     ad_account_id: str = "",
     ad_group_id: str = "",
     campaign_id: str = "",
+    include_copy: bool = False,
 ) -> dict:
     account = resolve_account(config, ad_account_id)
     params: dict = {}
@@ -526,6 +570,22 @@ def get_reddit_ads(
     rows = reddit_get_all(config, f"ad_accounts/{account}/ads", params)
     ads = [_ad_summary(a) for a in rows]
     insights: list[str] = []
+    if include_copy:
+        # One request per distinct post. The list endpoint carries ids only,
+        # and an ad's headline, body and destination live on the post.
+        post_ids = list(dict.fromkeys(a["post_id"] for a in ads if a.get("post_id")))
+        posts: dict[str, dict] = {}
+        for post_id in post_ids[:_MAX_COPY_FETCHES]:
+            raw = get_reddit_post(config, post_id)
+            if raw:
+                posts[post_id] = _post_summary(raw)
+        for ad in ads:
+            ad["post"] = posts.get(ad.get("post_id") or "")
+        if len(post_ids) > _MAX_COPY_FETCHES:
+            insights.append(
+                f"Copy was fetched for the first {_MAX_COPY_FETCHES} of {len(post_ids)} posts; "
+                "narrow with ad_group_id or campaign_id for the rest."
+            )
     rejected = [a for a in ads if a["effective_status"] == "REJECTED"]
     if rejected:
         names = ", ".join(

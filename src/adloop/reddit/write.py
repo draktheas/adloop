@@ -29,7 +29,7 @@ from adloop.reddit.client import (
     reddit_post,
     to_micro,
 )
-from adloop.reddit.read import account_meta, resolve_account
+from adloop.reddit.read import account_meta, get_reddit_post, resolve_account
 from adloop.reddit.schedule import describe_schedule, parse_schedule
 
 if TYPE_CHECKING:
@@ -59,7 +59,9 @@ _BID_TYPES = {"CPC", "CPM", "CPV", "CPV6", "CPV15"}
 _GOAL_TYPES = {"DAILY_SPEND", "LIFETIME_SPEND"}
 _POST_TYPES = {"TEXT", "IMAGE"}
 _GENDERS = {"FEMALE", "MALE"}
-_PLATFORMS = {"ALL", "DESKTOP", "MOBILE_NATIVE", "MOBILE_WEB"}
+_PLATFORMS = {"ALL", "DESKTOP", "DESKTOP_LEGACY", "MOBILE_NATIVE", "MOBILE_WEB", "MOBILE_WEB_3X", "SHREDTOP"}
+# Reddit calls placements "locations": the feed, or conversation (comments) pages.
+_LOCATIONS = {"FEED", "COMMENTS_PAGE"}
 _CALL_TO_ACTIONS = {
     "Apply Now", "Contact Us", "Download", "Get a Quote", "Get Showtimes",
     "Install", "Learn More", "Order Now", "Play Now", "Pre-order Now",
@@ -462,6 +464,7 @@ def _targeting_payload(
     platforms: list | None,
     expand_targeting: bool | None,
     errors: list[str],
+    locations: list | None = None,
 ) -> dict:
     targeting: dict[str, Any] = {}
 
@@ -498,6 +501,14 @@ def _targeting_payload(
         targeting["platforms"] = cleaned
     if expand_targeting is not None:
         targeting["expand_targeting"] = bool(expand_targeting)
+    if locations is not None:
+        cleaned = [x.upper() for x in _clean(locations)]
+        bad = sorted(set(cleaned) - _LOCATIONS)
+        if bad:
+            errors.append(f"locations contains unsupported values {bad}; use {sorted(_LOCATIONS)}")
+        if not cleaned:
+            errors.append("locations cannot be empty: an ad needs at least one placement (FEED, COMMENTS_PAGE)")
+        targeting["locations"] = cleaned
     return targeting
 
 
@@ -526,6 +537,7 @@ def update_reddit_ad_group(
     platforms: list | None = None,
     expand_targeting: bool | None = None,
     schedule: list | None = None,
+    locations: list | None = None,
 ) -> dict:
     """Draft ad group changes: budget, bid, run dates, weekly schedule, targeting (lists REPLACE)."""
     blocked = _guard("update_reddit_ad_group", config)
@@ -556,7 +568,7 @@ def update_reddit_ad_group(
         communities=communities, excluded_communities=excluded_communities,
         interests=interests, keywords=keywords, excluded_keywords=excluded_keywords,
         languages=languages, gender=gender, platforms=platforms,
-        expand_targeting=expand_targeting, errors=errors,
+        expand_targeting=expand_targeting, errors=errors, locations=locations,
     )
     if errors:
         return _validation_error(errors)
@@ -721,6 +733,19 @@ def update_reddit_ad(
     current = _fetch(config, "ad", ad_id)
     if not current:
         return {"error": f"Reddit ad '{ad_id}' was not found."}
+    if click_url and current.get("post_id"):
+        # Text ("free form") ads open the post; Reddit refuses a click_url on
+        # them at apply time ("Free form ads cannot have a click url"), and
+        # the dry run cannot catch it because it sends nothing. Ask now.
+        post = get_reddit_post(config, str(current["post_id"]))
+        if post and str(post.get("type") or "").upper() == "TEXT":
+            return _validation_error(
+                [
+                    "This is a TEXT (free-form) ad: it opens the post itself, and Reddit "
+                    "refuses a click_url on it. The link readers follow is in the post body, "
+                    "which cannot be edited; for a new link, draft a new post with draft_reddit_ad."
+                ]
+            )
 
     patch: dict[str, Any] = {}
     display: dict[str, Any] = {}
@@ -966,6 +991,7 @@ def draft_reddit_ad_group(
     start_time: str = "",
     end_time: str = "",
     schedule: list | None = None,
+    locations: list | None = None,
 ) -> dict:
     """Draft a new ad group (created PAUSED) with budget, bid, pixel, schedule and targeting."""
     blocked = _guard("draft_reddit_ad_group", config)
@@ -1011,7 +1037,7 @@ def draft_reddit_ad_group(
         communities=communities, excluded_communities=excluded_communities,
         interests=interests, keywords=keywords, excluded_keywords=excluded_keywords,
         languages=languages, gender=gender, platforms=platforms,
-        expand_targeting=expand_targeting, errors=errors,
+        expand_targeting=expand_targeting, errors=errors, locations=locations,
     )
     if not any(targeting.get(k) for k in ("geolocations", "communities", "interests", "keywords")):
         errors.append(
@@ -1160,6 +1186,141 @@ def draft_reddit_ad_group(
     )
 
 
+def _draft_ad_from_post(
+    config: AdLoopConfig,
+    *,
+    errors: list[str],
+    warnings: list[str],
+    ad_account_id: str,
+    ad_group_id: str,
+    ad_name: str,
+    profile_id: str,
+    post_id: str,
+    click_url: str,
+    copy_given: bool,
+) -> dict:
+    """Promote an existing post: an ad on a post that already exists.
+
+    The usual reason is a post that already has upvotes and comments, which a
+    freshly created copy would not. Text posts open themselves on click and
+    refuse a click_url; media posts click through to the ad's click_url,
+    which defaults to the destination stored on the post.
+    """
+    click_url = (click_url or "").strip()
+    if click_url and not click_url.startswith(("http://", "https://")):
+        errors.append("click_url must start with http:// or https://")
+    try:
+        account = resolve_account(config, ad_account_id)
+    except ValueError as e:
+        errors.append(str(e))
+        account = ""
+    if copy_given:
+        warnings.append(
+            "post_id promotes an existing post: headline, body, image_url, "
+            "call_to_action and display_url were ignored."
+        )
+    if errors:
+        return _validation_error(errors)
+
+    post = get_reddit_post(config, post_id)
+    if not post:
+        return {"error": f"Reddit post '{post_id}' was not found (ids look like t3_abc123)."}
+    post_type = str(post.get("type") or "").upper()
+    post_profile = str(post.get("profile_id") or "")
+    profile_id = (profile_id or "").strip() or post_profile
+    if post_profile and profile_id != post_profile:
+        errors.append(
+            f"post {post_id} belongs to profile {post_profile}, not {profile_id}; "
+            "an ad can only promote a post of its own profile."
+        )
+    content = post.get("content") or []
+    first = content[0] if content and isinstance(content[0], dict) else {}
+    body = str(post.get("body") or "")
+    if post_type == "TEXT":
+        if click_url:
+            errors.append(
+                "This is a TEXT (free-form) post: it opens itself on click and Reddit "
+                "refuses a click_url on the ad. Leave click_url empty; the link readers "
+                "follow has to be in the post body."
+            )
+        elif "http://" not in body and "https://" not in body:
+            warnings.append(
+                "The post body contains no link, so the ad leads nowhere beyond the post "
+                "itself. Expect post views and comments, not landing-page clicks."
+            )
+    else:
+        click_url = click_url or str(first.get("destination_url") or "")
+        if not click_url:
+            errors.append(
+                f"{post_type} posts need a click_url and this post stores no destination; "
+                "pass click_url."
+            )
+    if errors:
+        return _validation_error(errors)
+    if click_url:
+        from adloop.ads.write import _validate_urls
+
+        url_errors, url_warnings = _validate_urls([click_url])
+        for url, problem in url_errors.items():
+            if problem:
+                errors.append(f"'{url}' is not reachable: {problem}")
+        warnings.extend(url_warnings.values())
+        if errors:
+            return _validation_error(errors)
+
+    ad_group = _fetch(config, "ad_group", ad_group_id)
+    if not ad_group:
+        return {"error": f"Reddit ad group '{ad_group_id}' was not found."}
+
+    headline = str(post.get("headline") or "")
+    ad_payload: dict[str, Any] = {
+        "ad_group_id": ad_group_id,
+        "name": (ad_name or headline or post_id)[:200],
+        "configured_status": "PAUSED",
+        "profile_id": profile_id,
+        "post_id": post_id,
+    }
+    if post_type != "TEXT" and click_url:
+        ad_payload["click_url"] = click_url
+    if post.get("allow_comments"):
+        warnings.append(
+            "Comments are enabled on this post: Redditors will reply publicly on the ad. "
+            "update_reddit_ad(allow_comments=false) turns them off after creation."
+        )
+    warnings.append(
+        "The ad is created PAUSED and then goes through Reddit policy review "
+        "(PENDING_APPROVAL) once enabled."
+    )
+    return _store(
+        {
+            "operation": "reddit_create_ad",
+            "entity_type": "ad",
+            "entity_id": "",
+            "customer_id": account,
+            "changes": {
+                "ad_account_id": account,
+                "ad_group_name": ad_group.get("name"),
+                "campaign_id": ad_group.get("campaign_id"),
+                "profile_id": profile_id,
+                # No post payload: the apply step promotes the existing post.
+                "post": None,
+                "existing_post_id": post_id,
+                "ad": ad_payload,
+                "display": {
+                    "existing_post": True,
+                    "post_id": post_id,
+                    "post_url": post.get("post_url"),
+                    "headline": headline,
+                    "post_type": post_type,
+                    "click_url": ad_payload.get("click_url"),
+                    "status_on_create": "PAUSED",
+                },
+            },
+        },
+        warnings=warnings,
+    )
+
+
 def draft_reddit_ad(
     config: AdLoopConfig,
     *,
@@ -1175,8 +1336,13 @@ def draft_reddit_ad(
     call_to_action: str = "",
     display_url: str = "",
     allow_comments: bool = True,
+    post_id: str = "",
 ) -> dict:
-    """Draft a post + ad pair (created PAUSED). IMAGE posts take a public image_url."""
+    """Draft a post + ad pair (created PAUSED). IMAGE posts take a public image_url.
+
+    With ``post_id`` an existing post is promoted instead: no post is created,
+    the copy arguments are ignored, and the ad points at that post.
+    """
     blocked = _guard("draft_reddit_ad", config)
     if blocked:
         return blocked
@@ -1185,6 +1351,14 @@ def draft_reddit_ad(
     ad_group_id = (ad_group_id or "").strip()
     if not ad_group_id:
         errors.append("ad_group_id is required (see get_reddit_ad_groups)")
+    post_id = (post_id or "").strip()
+    if post_id:
+        return _draft_ad_from_post(
+            config, errors=errors, warnings=warnings, ad_account_id=ad_account_id,
+            ad_group_id=ad_group_id, ad_name=ad_name, profile_id=profile_id,
+            post_id=post_id, click_url=click_url,
+            copy_given=bool(headline or body or image_url or call_to_action or display_url),
+        )
     profile_id = (profile_id or "").strip()
     if not profile_id:
         errors.append(
@@ -1387,6 +1561,10 @@ def preflight(config: AdLoopConfig, plan: ChangePlan) -> dict:
         if not group:
             raise ValueError(f"ad group '{ad_group_id}' no longer exists.")
         checks["ad_group"] = group.get("name")
+        if changes.get("existing_post_id"):
+            if not get_reddit_post(config, str(changes["existing_post_id"])):
+                raise ValueError(f"post '{changes['existing_post_id']}' no longer exists.")
+            checks["existing_post_id"] = changes["existing_post_id"]
     else:
         raise ValueError(f"Unknown Reddit operation: {plan.operation}")
     checks["status_on_create"] = "PAUSED" if plan.operation.startswith("reddit_create_") else None
@@ -1469,21 +1647,28 @@ def apply_plan(config: AdLoopConfig, plan: ChangePlan) -> dict:
 
     if op == "reddit_create_ad":
         profile_id = changes["profile_id"]
-        post = data_of(reddit_post(config, f"profiles/{profile_id}/posts", {"data": changes["post"]}))
-        post_id = post.get("id")
-        if not post_id:
-            raise ValueError("Reddit created the post but returned no post id; check Ads Manager.")
+        if changes.get("existing_post_id"):
+            post_id = str(changes["existing_post_id"])
+            post = get_reddit_post(config, post_id) or {"id": post_id}
+        else:
+            post = data_of(reddit_post(config, f"profiles/{profile_id}/posts", {"data": changes["post"]}))
+            post_id = post.get("id")
+            if not post_id:
+                raise ValueError("Reddit created the post but returned no post id; check Ads Manager.")
         ad_payload = dict(changes["ad"])
         ad_payload["post_id"] = post_id
         ad_payload["configured_status"] = "PAUSED"
         try:
             ad = data_of(reddit_post(config, f"ad_accounts/{account}/ads", {"data": ad_payload}))
         except Exception as exc:
+            if changes.get("existing_post_id"):
+                raise
             # The post exists now; say so instead of leaving an orphan the
             # user cannot find.
             raise ValueError(
                 f"The post was created (post_id {post_id}, {post.get('post_url') or 'no url'}) "
-                f"but the ad could not be: {exc}. Reuse the post_id when retrying."
+                f"but the ad could not be: {exc}. Reuse the post_id when retrying "
+                "(draft_reddit_ad accepts post_id)."
             ) from exc
         return {
             "ad_id": ad.get("id"),

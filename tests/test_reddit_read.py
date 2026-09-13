@@ -140,6 +140,37 @@ class TestStructure:
         assert any("PENDING_APPROVAL" in i for i in result["insights"])
 
 
+    def test_include_copy_fetches_each_post_once(self, config):
+        calls, ctx = _fake_api({
+            ("GET", "ad_accounts/a2_acct/ads"): {"data": [
+                {"id": "ad1", "name": "A", "post_id": "t3_a", "effective_status": "ACTIVE"},
+                {"id": "ad2", "name": "B", "post_id": "t3_a", "effective_status": "ACTIVE"},
+                {"id": "ad3", "name": "C", "post_id": "t3_c", "effective_status": "ACTIVE"},
+            ]},
+            ("GET", "posts/t3_a"): {"data": {"id": "t3_a", "type": "IMAGE", "headline": "Hero", "body": "",
+                                              "content": [{"destination_url": "https://example.com", "display_url": "example.com",
+                                                           "call_to_action": "Learn More", "media_url": "https://i.redd.it/a.jpg"}],
+                                              "allow_comments": True}},
+            ("GET", "posts/t3_c"): {"data": {"id": "t3_c", "type": "TEXT", "headline": "Plain", "body": "x" * 700, "content": []}},
+        })
+        with ctx:
+            result = read.get_reddit_ads(config, include_copy=True)
+        assert sum(1 for c in calls if "posts/" in c[1]) == 2
+        a, b, c = result["ads"]
+        assert a["post"]["headline"] == "Hero" and a["post"]["destination_url"] == "https://example.com"
+        assert a["post"]["call_to_action"] == "Learn More" and a["post"]["type"] == "IMAGE"
+        assert b["post"] is a["post"]
+        assert c["post"]["type"] == "TEXT" and c["post"]["body_truncated"] and len(c["post"]["body"]) == 600
+        assert c["post"]["destination_url"] is None
+
+    def test_without_include_copy_no_post_calls(self, config):
+        calls, ctx = _fake_api({("GET", "ad_accounts/a2_acct/ads"): {"data": [{"id": "ad1", "post_id": "t3_a"}]}})
+        with ctx:
+            result = read.get_reddit_ads(config)
+        assert "post" not in result["ads"][0]
+        assert not any("posts/" in c[1] for c in calls)
+
+
 class TestPerformance:
     def _routes(self, report_rows):
         return {

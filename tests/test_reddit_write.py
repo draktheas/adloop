@@ -168,6 +168,17 @@ class TestUpdateDrafts:
         assert patch_targeting["gender"] == "FEMALE"
         assert any("REPLACE" in w for w in preview["warnings"])
 
+    def test_locations_are_validated_and_replace_placements(self):
+        _, ctx = _fake_api({("GET", "ad_groups/g1"): _AD_GROUP, ("GET", "ad_accounts/a2_acct"): _ACCOUNT})
+        with ctx:
+            preview = write.update_reddit_ad_group(_config(), ad_group_id="g1", locations=["feed"])
+        assert preview["changes"]["patch"]["targeting"]["locations"] == ["FEED"]
+        assert preview["changes"]["patch"]["targeting"]["geolocations"] == ["DE"]
+        bad = write.update_reddit_ad_group(_config(), ad_group_id="g1", locations=["SEARCH"])
+        assert any("COMMENTS_PAGE" in d for d in bad["details"])
+        empty = write.update_reddit_ad_group(_config(), ad_group_id="g1", locations=[])
+        assert any("cannot be empty" in d for d in empty["details"])
+
     def test_schedule_patch_previews_readable_windows(self):
         scheduled = {"data": dict(_AD_GROUP["data"], schedule=[
             {"start_day": d, "start_hour": 13, "end_day": d, "end_hour": 23} for d in range(5)
@@ -252,11 +263,14 @@ class TestUpdateDrafts:
 
 _AD = {"data": {"id": "ad1", "name": "Hero", "configured_status": "ACTIVE", "post_id": "post1",
                  "click_url": "https://example.com/old", "ad_group_id": "g1"}}
+# The post behind _AD: an image post, so a click_url is legitimate.
+_AD_POST = {"data": {"id": "post1", "type": "IMAGE", "headline": "Hero",
+                     "content": [{"destination_url": "https://example.com/old"}]}}
 
 
 class TestUpdateAd:
     def test_update_ad_previews_url_name_and_comments(self):
-        _, ctx = _fake_api({("GET", "ads/ad1"): _AD})
+        _, ctx = _fake_api({("GET", "ads/ad1"): _AD, ("GET", "posts/post1"): _AD_POST})
         with ctx, patch("adloop.ads.write._validate_urls", return_value=({"https://example.com/new": None}, {})):
             preview = write.update_reddit_ad(
                 _config(), ad_id="ad1", click_url="https://example.com/new", name="Hero v2", allow_comments=False,
@@ -275,10 +289,25 @@ class TestUpdateAd:
             nothing = write.update_reddit_ad(_config(), ad_id="ad1", name="Hero")
         assert any("cannot be edited" in d for d in nothing["details"])
 
+    def test_update_ad_refuses_click_url_on_text_posts_before_the_dry_run(self):
+        text_post = {"data": {"id": "post1", "type": "TEXT", "headline": "h", "body": "see https://example.com"}}
+        _, ctx = _fake_api({("GET", "ads/ad1"): _AD, ("GET", "posts/post1"): text_post})
+        with ctx, patch("adloop.ads.write._validate_urls", return_value=({"https://example.com/new": None}, {})):
+            result = write.update_reddit_ad(_config(), ad_id="ad1", click_url="https://example.com/new")
+        assert result["error"]
+        assert any("free-form" in d and "draft_reddit_ad" in d for d in result["details"])
+
+    def test_update_ad_keeps_click_url_on_image_posts(self):
+        image_post = {"data": {"id": "post1", "type": "IMAGE", "headline": "h", "content": [{"destination_url": "https://example.com/old"}]}}
+        _, ctx = _fake_api({("GET", "ads/ad1"): _AD, ("GET", "posts/post1"): image_post})
+        with ctx, patch("adloop.ads.write._validate_urls", return_value=({"https://example.com/new": None}, {})):
+            preview = write.update_reddit_ad(_config(), ad_id="ad1", click_url="https://example.com/new")
+        assert preview["changes"]["patch"] == {"click_url": "https://example.com/new"}
+
     def test_update_ad_apply_patches_ad_then_post(self):
         from adloop.ads import write as ads_write
 
-        _, ctx = _fake_api({("GET", "ads/ad1"): _AD})
+        _, ctx = _fake_api({("GET", "ads/ad1"): _AD, ("GET", "posts/post1"): _AD_POST})
         with ctx, patch("adloop.ads.write._validate_urls", return_value=({"https://example.com/new": None}, {})):
             plan_id = write.update_reddit_ad(
                 _config(), ad_id="ad1", click_url="https://example.com/new", allow_comments=False,
@@ -478,6 +507,72 @@ class TestCreationDrafts:
         assert "click_url" not in changes["ad"]  # free-form ads open the post
         assert any("open the Reddit post" in w for w in preview["warnings"])
         assert changes["ad"]["configured_status"] == "PAUSED"
+
+    def test_existing_text_post_is_promoted_without_creating_a_post(self):
+        from adloop.ads import write as ads_write
+
+        text_post = {"data": {"id": "t3_x", "type": "TEXT", "profile_id": "p1", "headline": "Old post",
+                              "body": "read more at https://example.com", "allow_comments": True,
+                              "post_url": "https://reddit.com/p/t3_x"}}
+        _, ctx = _fake_api({("GET", "posts/t3_x"): text_post, ("GET", "ad_groups/g1"): _AD_GROUP})
+        with ctx:
+            preview = write.draft_reddit_ad(_config(), ad_group_id="g1", post_id="t3_x", headline="ignored")
+        assert preview["operation"] == "reddit_create_ad"
+        assert preview["changes"]["post"] is None
+        assert preview["changes"]["existing_post_id"] == "t3_x"
+        ad = preview["changes"]["ad"]
+        assert ad["post_id"] == "t3_x" and ad["profile_id"] == "p1" and ad["name"] == "Old post"
+        assert "click_url" not in ad
+        assert any("were ignored" in w for w in preview["warnings"])
+        assert any("Comments are enabled" in w for w in preview["warnings"])
+
+        calls, ctx = _fake_api({
+            ("GET", "posts/t3_x"): text_post, ("GET", "ad_groups/g1"): _AD_GROUP,
+            ("GET", "ad_accounts/a2_acct"): _ACCOUNT,
+            ("POST", "ad_accounts/a2_acct/ads"): lambda body: {"data": {"id": "ad9", "post_id": body["data"]["post_id"],
+                                                                        "configured_status": "PAUSED"}},
+        })
+        with ctx, _no_scope_check():
+            dry = ads_write.confirm_and_apply(_config(), plan_id=preview["plan_id"], dry_run=True)
+            assert dry["checks"]["existing_post_id"] == "t3_x"
+            result = ads_write.confirm_and_apply(_config(), plan_id=preview["plan_id"], dry_run=False)
+        assert result["status"] == "APPLIED"
+        assert result["result"]["ad_id"] == "ad9" and result["result"]["post_id"] == "t3_x"
+        assert not any(c[0] == "POST" and c[1].endswith("/posts") for c in calls)
+
+    def test_existing_text_post_refuses_click_url_and_flags_missing_link(self):
+        text_post = {"data": {"id": "t3_x", "type": "TEXT", "profile_id": "p1", "headline": "h", "body": "no link here"}}
+        _, ctx = _fake_api({("GET", "posts/t3_x"): text_post, ("GET", "ad_groups/g1"): _AD_GROUP})
+        with ctx:
+            refused = write.draft_reddit_ad(_config(), ad_group_id="g1", post_id="t3_x", click_url="https://example.com")
+            assert any("refuses a click_url" in d for d in refused["details"])
+            preview = write.draft_reddit_ad(_config(), ad_group_id="g1", post_id="t3_x")
+        assert any("contains no link" in w for w in preview["warnings"])
+
+    def test_existing_image_post_defaults_click_url_to_its_destination(self):
+        image_post = {"data": {"id": "t3_i", "type": "IMAGE", "profile_id": "p1", "headline": "Pic",
+                               "content": [{"destination_url": "https://example.com/land", "media_url": "https://i.redd.it/x.jpg"}]}}
+        _, ctx = _fake_api({("GET", "posts/t3_i"): image_post, ("GET", "ad_groups/g1"): _AD_GROUP})
+        with ctx, patch("adloop.ads.write._validate_urls", return_value=({"https://example.com/land": None}, {})):
+            preview = write.draft_reddit_ad(_config(), ad_group_id="g1", post_id="t3_i", ad_name="Pic again")
+        assert preview["changes"]["ad"]["click_url"] == "https://example.com/land"
+        assert preview["changes"]["display"]["post_type"] == "IMAGE"
+
+    def test_existing_post_must_belong_to_the_profile_and_exist(self):
+        image_post = {"data": {"id": "t3_i", "type": "IMAGE", "profile_id": "p1", "content": [{"destination_url": "https://example.com"}]}}
+        _, ctx = _fake_api({("GET", "posts/t3_i"): image_post})
+        with ctx:
+            wrong = write.draft_reddit_ad(_config(), ad_group_id="g1", post_id="t3_i", profile_id="p2")
+        assert any("belongs to profile p1" in d for d in wrong["details"])
+
+        def missing(*args, **kwargs):
+            from adloop.reddit.auth import RedditApiError
+
+            raise RedditApiError("Reddit Ads API returned 404", status=404)
+
+        with patch("adloop.reddit.client.reddit_request", side_effect=missing):
+            gone = write.draft_reddit_ad(_config(), ad_group_id="g1", post_id="t3_nope")
+        assert "was not found" in gone["error"]
 
     def test_text_ad_requires_the_link_in_the_body(self):
         with patch("adloop.ads.write._validate_urls", return_value=({"https://example.com/x": None}, {})):
