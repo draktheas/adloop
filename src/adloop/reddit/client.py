@@ -71,6 +71,21 @@ def _rate_limit_reset(headers: Any) -> int | None:
     return min(values) if values else None
 
 
+# A per-field validation message can carry Reddit's whole enum: the report
+# endpoint answers a bad field name with every one of its ~600 field names,
+# which is a wall of text nobody reads and a context budget spent for nothing.
+_MAX_FIELD_MESSAGE = 240
+
+
+def _trim(message: str) -> str:
+    if len(message) <= _MAX_FIELD_MESSAGE:
+        return message
+    head, sep, _ = message.partition(" is not one of [")
+    if sep:
+        return f"{head} is not a valid value (see Reddit's field reference for the allowed list)"
+    return message[:_MAX_FIELD_MESSAGE] + "…"
+
+
 def _error_detail(payload: Any) -> str:
     """Pull a human-readable message out of Reddit's several error shapes."""
     if not isinstance(payload, dict):
@@ -83,10 +98,12 @@ def _error_detail(payload: Any) -> str:
         fields = err.get("fields")
         if isinstance(fields, list) and fields:
             details = "; ".join(
-                f"{f.get('field', '?')}: {f.get('message', '')}" for f in fields[:5] if isinstance(f, dict)
+                f"{f.get('field', '?')}: {_trim(str(f.get('message', '')))}"
+                for f in fields[:5]
+                if isinstance(f, dict)
             )
             message = f"{message} ({details})" if message else details
-        return message
+        return _trim(message) if len(message) > 4 * _MAX_FIELD_MESSAGE else message
     if isinstance(err, str) and err:
         return err
     errors = payload.get("errors")

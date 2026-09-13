@@ -20,6 +20,7 @@ from adloop.reddit.client import (
     reddit_post,
     reddit_request,
 )
+from adloop.reddit.schedule import describe_schedule, named_blocks
 
 if TYPE_CHECKING:
     from adloop.config import AdLoopConfig
@@ -246,6 +247,10 @@ def _campaign_summary(c: dict) -> dict:
         "funding_instrument_id": c.get("funding_instrument_id"),
         "start_time": c.get("start_time"),
         "end_time": c.get("end_time"),
+        # Only meaningful with campaign budget optimization, where it
+        # replaces every ad group's schedule.
+        "schedule": named_blocks(c.get("schedule")),
+        "schedule_summary": describe_schedule(c.get("schedule")),
         "created_at": c.get("created_at"),
         "modified_at": c.get("modified_at"),
     }
@@ -297,6 +302,10 @@ def _ad_group_summary(g: dict) -> dict:
         "conversion_pixel_id": g.get("conversion_pixel_id"),
         "start_time": g.get("start_time"),
         "end_time": g.get("end_time"),
+        # Weekly delivery windows, applied in each viewer's local time.
+        # "any time" when unset. Silence outside them is by design.
+        "schedule": named_blocks(g.get("schedule")),
+        "schedule_summary": describe_schedule(g.get("schedule")),
         "targeting": _targeting_summary(g.get("targeting")),
         "delivery_status": g.get("delivery_status"),
     }
@@ -459,6 +468,20 @@ def get_reddit_campaigns(
     }
 
 
+def _schedule_insights(ad_groups: list[dict]) -> list[str]:
+    """Name the scheduled ad groups so a quiet weekend is not read as an outage."""
+    scheduled = [g for g in ad_groups if g.get("schedule")]
+    if not scheduled:
+        return []
+    listed = "; ".join(f"{g['name']}: {g['schedule_summary']}" for g in scheduled[:5])
+    more = f" (+{len(scheduled) - 5} more)" if len(scheduled) > 5 else ""
+    return [
+        f"{len(scheduled)} ad group(s) run on a weekly schedule, in each viewer's "
+        f"local time: {listed}{more}. Zero impressions outside those hours and "
+        "days is by design, not a delivery problem."
+    ]
+
+
 def get_reddit_ad_groups(
     config: AdLoopConfig,
     *,
@@ -477,6 +500,7 @@ def get_reddit_ad_groups(
             f"{len(no_pixel)} ad group(s) have no conversion_pixel_id. Reddit "
             "requires one on every ad group since 2026-07-13; delivery may stop."
         )
+    insights.extend(_schedule_insights(ad_groups))
     return {
         "ad_account_id": account,
         "currency": meta["currency"],
@@ -686,6 +710,11 @@ def get_reddit_performance(
             "No rows for this window. Reddit report data stabilises within about "
             "6 hours; a window ending today may still be empty."
         )
+    if level in ("ad_group", "ad"):
+        seen = {str(r.get("ad_group_id") or "") for r in rows}
+        insights.extend(
+            _schedule_insights([g for gid, g in names["ad_group"].items() if gid in seen])
+        )
 
     totals = {
         "spend": round(sum(r.get("spend") or 0 for r in rows), 2),
@@ -720,6 +749,8 @@ def get_reddit_performance(
         result["compact"] = True
         result["total_rows"] = len(rows)
         result["rows_top_spend"] = top
+        # Offenders are entities; with a breakdown or at account level the
+        # rows are dates, countries or hours and have no name to report.
         result["zero_conversion_spenders"] = [
             {
                 "campaign_id": r.get("campaign_id"),
@@ -730,7 +761,7 @@ def get_reddit_performance(
                 "clicks": r.get("clicks"),
             }
             for r in zero_conv[:5]
-        ]
+        ] if level != "account" and not breakdown else []
         result["note"] += (
             f" Compact mode: showing {len(top)} of {len(rows)} rows; call "
             "get_reddit_performance without compact=true for every row."

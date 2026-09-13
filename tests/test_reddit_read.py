@@ -109,6 +109,23 @@ class TestStructure:
         assert g1["targeting"]["communities"] == ["r/python"]
         assert any("conversion_pixel_id" in i for i in result["insights"])
 
+    def test_ad_groups_name_their_schedule_and_say_silence_is_by_design(self, config):
+        _, ctx = _fake_api({
+            ("GET", "ad_accounts/a2_acct/ad_groups"): {"data": [
+                {"id": "g1", "campaign_id": "c1", "name": "EN", "conversion_pixel_id": "px1",
+                 "schedule": [{"start_day": d, "start_hour": 13, "end_day": d, "end_hour": 23} for d in range(5)]},
+                {"id": "g2", "campaign_id": "c1", "name": "Always", "conversion_pixel_id": "px1", "schedule": []},
+            ]},
+            ("GET", "ad_accounts/a2_acct"): _ACCOUNT,
+        })
+        with ctx:
+            result = read.get_reddit_ad_groups(config)
+        g1, g2 = result["ad_groups"]
+        assert g1["schedule"][0] == {"start_day": "MON", "start_hour": 13, "end_day": "MON", "end_hour": 23}
+        assert g1["schedule_summary"] == "Mon–Fri 13:00–23:59"
+        assert g2["schedule"] == [] and g2["schedule_summary"] == "any time"
+        assert any("EN: Mon–Fri 13:00–23:59" in i and "by design" in i for i in result["insights"])
+
     def test_ads_flag_rejections(self, config):
         _, ctx = _fake_api({
             ("GET", "ad_accounts/a2_acct/ads"): {"data": [

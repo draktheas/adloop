@@ -2337,7 +2337,7 @@ def get_reddit_campaigns(ad_account_id: str = "", include_archived: bool = False
 @mcp.tool(title="Reddit ad groups", annotations=_READONLY, tags={"reddit"})
 @_safe
 def get_reddit_ad_groups(ad_account_id: str = "", campaign_id: str = "") -> dict:
-    """List Reddit ad groups (budget, bid, pixel, targeting summary), optionally per campaign.
+    """List Reddit ad groups (budget, bid, pixel, weekly schedule, targeting summary), optionally per campaign.
 
     Reddit requires conversion_pixel_id on every ad group; insights flag ad
     groups without one.
@@ -2643,13 +2643,20 @@ def update_reddit_campaign(
     bid_value: float | None = None,
     start_time: str = "",
     end_time: str = "",
+    schedule: _DictListOpt = None,
 ) -> dict:
-    """Draft changes to a Reddit campaign — name, schedule, spend cap, and (CBO only) budget/bid.
+    """Draft changes to a Reddit campaign — name, run dates, spend cap, and (CBO only) budget/bid/schedule.
 
     daily_budget / lifetime_budget / bid_* apply only when the campaign uses
     campaign budget optimization; otherwise the budget lives on its ad groups
     (use update_reddit_ad_group). Budgets are in account currency and checked
     against max_daily_budget. The preview shows old → new per field.
+    schedule: weekly delivery windows ("time of day" in Ads Manager), a list
+    of blocks like {"days": "MON-FRI", "start_hour": 13, "end_hour": 23}
+    (day names, hours 0-23, end_hour inclusive) or the native
+    {"start_day": "FRI", "start_hour": 22, "end_day": "SAT", "end_hour": 3}.
+    [] clears it (deliver at any time). Hours apply in each viewer's local
+    time, not the account time zone.
     """
     from adloop.reddit.write import update_reddit_campaign as _impl
 
@@ -2666,6 +2673,7 @@ def update_reddit_campaign(
         bid_value=bid_value,
         start_time=start_time,
         end_time=end_time,
+        schedule=schedule,
     )
 
 
@@ -2693,13 +2701,20 @@ def update_reddit_ad_group(
     gender: str = "",
     platforms: _StrListOpt = None,
     expand_targeting: bool | None = None,
+    schedule: _DictListOpt = None,
 ) -> dict:
-    """Draft changes to a Reddit ad group — budget, bid, schedule, targeting.
+    """Draft changes to a Reddit ad group — budget, bid, run dates, weekly schedule, targeting.
 
     Budget (daily_budget or lifetime_budget + end_time) is checked against
     max_daily_budget; bid_value against max_bid_increase_pct. Targeting lists
     REPLACE the current value of each key you pass (pass the full list);
     keys you omit are preserved. Ids/names come from search_reddit_targeting.
+    schedule: weekly delivery windows ("time of day" in Ads Manager), a list
+    of blocks like {"days": "MON-FRI", "start_hour": 13, "end_hour": 23}
+    (day names, hours 0-23, end_hour inclusive) or the native
+    {"start_day": "FRI", "start_hour": 22, "end_day": "SAT", "end_hour": 3}.
+    [] clears it (deliver at any time). Hours apply in each viewer's local
+    time, not the account time zone.
     """
     from adloop.reddit.write import update_reddit_ad_group as _impl
 
@@ -2726,6 +2741,7 @@ def update_reddit_ad_group(
         gender=gender,
         platforms=platforms,
         expand_targeting=expand_targeting,
+        schedule=schedule,
     )
 
 
@@ -2774,6 +2790,7 @@ def draft_reddit_campaign(
     spend_cap: float | None = None,
     start_time: str = "",
     end_time: str = "",
+    schedule: _DictListOpt = None,
 ) -> dict:
     """Draft a new Reddit campaign (created PAUSED) — returns a PREVIEW.
 
@@ -2784,6 +2801,12 @@ def draft_reddit_campaign(
     (then daily_budget or lifetime_budget, bid_strategy, bid_type and
     conversion_pixel_id are required). Budgets are checked against
     max_daily_budget. Times are ISO 8601. Follow up with draft_reddit_ad_group.
+    schedule: weekly delivery windows ("time of day" in Ads Manager), a list
+    of blocks like {"days": "MON-FRI", "start_hour": 13, "end_hour": 23}
+    (day names, hours 0-23, end_hour inclusive) or the native
+    {"start_day": "FRI", "start_hour": 22, "end_day": "SAT", "end_hour": 3}.
+    [] clears it (deliver at any time). Hours apply in each viewer's local
+    time, not the account time zone.
     """
     from adloop.reddit.write import draft_reddit_campaign as _impl
 
@@ -2804,6 +2827,7 @@ def draft_reddit_campaign(
         spend_cap=spend_cap,
         start_time=start_time,
         end_time=end_time,
+        schedule=schedule,
     )
 
 
@@ -2833,6 +2857,7 @@ def draft_reddit_ad_group(
     expand_targeting: bool | None = None,
     start_time: str = "",
     end_time: str = "",
+    schedule: _DictListOpt = None,
 ) -> dict:
     """Draft a new Reddit ad group (created PAUSED) — returns a PREVIEW.
 
@@ -2845,6 +2870,13 @@ def draft_reddit_ad_group(
     MANUAL_BIDDING/TARGET_CPX need bid_value. optimization_goal is the pixel
     event to optimize for (PURCHASE, SIGN_UP, LEAD, PAGE_VISIT, ...).
     Budgets are checked against max_daily_budget.
+
+    schedule: weekly delivery windows ("time of day" in Ads Manager), a list
+    of blocks like {"days": "MON-FRI", "start_hour": 13, "end_hour": 23}
+    (day names, hours 0-23, end_hour inclusive) or the native
+    {"start_day": "FRI", "start_hour": 22, "end_day": "SAT", "end_hour": 3}.
+    Omit for delivery at any time. Hours apply in each viewer's local time,
+    not the account time zone.
     """
     from adloop.reddit.write import draft_reddit_ad_group as _impl
 
@@ -2873,6 +2905,7 @@ def draft_reddit_ad_group(
         expand_targeting=expand_targeting,
         start_time=start_time,
         end_time=end_time,
+        schedule=schedule,
     )
 
 

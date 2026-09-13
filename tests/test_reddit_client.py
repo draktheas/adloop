@@ -151,6 +151,20 @@ class TestRequest:
             with pytest.raises(RedditApiError, match="languages/0: 'en' is not one of"):
                 client.reddit_post(config, "ad_accounts/a2_x/ad_groups", {"data": {}})
 
+    def test_enum_walls_in_validation_errors_are_trimmed(self, config, creds):
+        options = ", ".join(f"'FIELD_{i}'" for i in range(600))
+        with patch(
+            "requests.request",
+            return_value=_Resp(400, {"error": {"code": 400, "message": "Bad Request", "fields": [
+                {"field": "data/fields/3", "message": f"'NOPE' is not one of [{options}]"},
+            ]}}),
+        ):
+            with pytest.raises(RedditApiError) as info:
+                client.reddit_post(config, "ad_accounts/a2_x/reports", {"data": {}})
+        assert "'NOPE' is not a valid value" in str(info.value)
+        assert "FIELD_599" not in str(info.value)
+        assert len(str(info.value)) < 400
+
     def test_other_errors_carry_status_url_and_detail(self, config, creds):
         with patch(
             "requests.request",

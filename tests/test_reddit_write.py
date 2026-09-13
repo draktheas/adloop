@@ -168,6 +168,61 @@ class TestUpdateDrafts:
         assert patch_targeting["gender"] == "FEMALE"
         assert any("REPLACE" in w for w in preview["warnings"])
 
+    def test_schedule_patch_previews_readable_windows(self):
+        scheduled = {"data": dict(_AD_GROUP["data"], schedule=[
+            {"start_day": d, "start_hour": 13, "end_day": d, "end_hour": 23} for d in range(5)
+        ])}
+        _, ctx = _fake_api({("GET", "ad_groups/g1"): scheduled, ("GET", "ad_accounts/a2_acct"): _ACCOUNT})
+        with ctx:
+            preview = write.update_reddit_ad_group(
+                _config(), ad_group_id="g1",
+                schedule=[{"days": "MON-SUN", "start_hour": 8, "end_hour": 22}],
+            )
+        assert len(preview["changes"]["patch"]["schedule"]) == 7
+        assert preview["changes"]["patch"]["schedule"][6] == {"start_day": 6, "start_hour": 8, "end_day": 6, "end_hour": 22}
+        assert preview["changes"]["display"]["schedule"] == {"from": "Mon–Fri 13:00–23:59", "to": "Mon–Sun 08:00–22:59"}
+        assert any("viewer's local time" in w for w in preview["warnings"])
+
+    def test_empty_schedule_clears_it(self):
+        _, ctx = _fake_api({("GET", "ad_groups/g1"): _AD_GROUP, ("GET", "ad_accounts/a2_acct"): _ACCOUNT})
+        with ctx:
+            preview = write.update_reddit_ad_group(_config(), ad_group_id="g1", schedule=[])
+        assert preview["changes"]["patch"] == {"schedule": []}
+        assert preview["changes"]["display"]["schedule"]["to"] == "any time"
+
+    def test_bad_schedule_is_a_validation_error(self):
+        result = write.update_reddit_ad_group(
+            _config(), ad_group_id="g1", schedule=[{"days": "MON", "start_hour": 25, "end_hour": 3}]
+        )
+        assert result["error"] and any("between 0 and 23" in d for d in result["details"])
+
+    def test_schedule_on_cbo_ad_group_points_to_campaign(self):
+        cbo_group = {"data": dict(_AD_GROUP["data"], is_campaign_budget_optimization=True)}
+        _, ctx = _fake_api({("GET", "ad_groups/g1"): cbo_group, ("GET", "ad_accounts/a2_acct"): _ACCOUNT})
+        with ctx:
+            result = write.update_reddit_ad_group(
+                _config(), ad_group_id="g1", schedule=[{"days": "MON", "start_hour": 1, "end_hour": 2}]
+            )
+        assert any("update_reddit_campaign" in d for d in result["details"])
+
+    def test_campaign_schedule_only_for_cbo(self):
+        _, ctx = _fake_api({("GET", "campaigns/c1"): _CAMPAIGN, ("GET", "ad_accounts/a2_acct"): _ACCOUNT})
+        with ctx:
+            result = write.update_reddit_campaign(
+                _config(), campaign_id="c1", schedule=[{"days": "MON", "start_hour": 1, "end_hour": 2}]
+            )
+        assert any("update_reddit_ad_group" in d for d in result["details"])
+
+    def test_cbo_campaign_schedule_change_replaces_ad_groups(self):
+        _, ctx = _fake_api({("GET", "campaigns/c9"): _CBO_CAMPAIGN, ("GET", "ad_accounts/a2_acct"): _ACCOUNT})
+        with ctx:
+            preview = write.update_reddit_campaign(
+                _config(), campaign_id="c9", schedule=[{"days": "SAT-SUN", "start_hour": 10, "end_hour": 20}]
+            )
+        assert [b["start_day"] for b in preview["changes"]["patch"]["schedule"]] == [5, 6]
+        assert preview["changes"]["display"]["schedule"]["from"] == "any time"
+        assert any("replaces every ad group" in w for w in preview["warnings"])
+
     def test_budget_on_cbo_ad_group_points_to_campaign(self):
         cbo_group = {"data": dict(_AD_GROUP["data"], is_campaign_budget_optimization=True)}
         _, ctx = _fake_api({("GET", "ad_groups/g1"): cbo_group, ("GET", "ad_accounts/a2_acct"): _ACCOUNT})
@@ -327,6 +382,38 @@ class TestCreationDrafts:
         assert payload["start_time"].endswith("Z") and len(payload["start_time"]) == 20
         assert not any("No language targeting" in w for w in preview["warnings"])
         assert not any("pre-validated" in w for w in preview["warnings"])
+
+    def test_ad_group_draft_carries_schedule(self):
+        _, ctx = _fake_api({
+            ("GET", "campaigns/c1"): _CAMPAIGN, ("GET", "ad_accounts/a2_acct"): _ACCOUNT,
+            ("POST", "targeting/keyword_validations"): {"data": []},
+            ("POST", "targeting/geolocations_validations"): {"data": [{"geolocation": {"id": "DE"}, "error_message": ""}]},
+        })
+        with ctx:
+            preview = write.draft_reddit_ad_group(
+                _config(), campaign_id="c1", ad_group_name="DE devs", conversion_pixel_id="px1",
+                daily_budget=20, bid_strategy="bidless", bid_type="cpc", geolocations=["DE"],
+                languages=["DE"], schedule=[{"days": "MON-FRI", "start_hour": 13, "end_hour": 23}],
+            )
+        assert len(preview["changes"]["payload"]["schedule"]) == 5
+        assert preview["changes"]["display"]["schedule"] == "Mon–Fri 13:00–23:59"
+        assert any("viewer's local time" in w for w in preview["warnings"])
+
+    def test_ad_group_draft_on_cbo_campaign_rejects_schedule(self):
+        _, ctx = _fake_api({("GET", "campaigns/c9"): _CBO_CAMPAIGN, ("GET", "ad_accounts/a2_acct"): _ACCOUNT})
+        with ctx:
+            result = write.draft_reddit_ad_group(
+                _config(), campaign_id="c9", ad_group_name="X", conversion_pixel_id="px1",
+                geolocations=["DE"], schedule=[{"days": "MON", "start_hour": 1, "end_hour": 2}],
+            )
+        assert any("update_reddit_campaign" in d for d in result["details"])
+
+    def test_campaign_draft_schedule_needs_cbo(self):
+        result = write.draft_reddit_campaign(
+            _config(), campaign_name="X", objective="CLICKS", funding_instrument_id="f1",
+            schedule=[{"days": "MON", "start_hour": 1, "end_hour": 2}],
+        )
+        assert any("campaign_budget_optimization=true" in d for d in result["details"])
 
     def test_ad_group_draft_refuses_unsafe_keywords_and_unknown_geos(self):
         _, ctx = _fake_api({

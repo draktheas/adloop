@@ -30,6 +30,7 @@ from adloop.reddit.client import (
     to_micro,
 )
 from adloop.reddit.read import account_meta, resolve_account
+from adloop.reddit.schedule import describe_schedule, parse_schedule
 
 if TYPE_CHECKING:
     from adloop.config import AdLoopConfig
@@ -67,6 +68,11 @@ _CALL_TO_ACTIONS = {
 # Reddit truncates titles around 300 characters; headlines beyond that
 # are almost always a mistake.
 _MAX_HEADLINE_CHARS = 300
+_SCHEDULE_NOTE = (
+    "Schedule hours apply in each viewer's local time, not the account time "
+    "zone, and end_hour is inclusive (23 runs to 23:59). Days and hours outside "
+    "the schedule get no delivery."
+)
 _MAX_TEXT_BODY_CHARS = 40_000
 
 
@@ -303,8 +309,9 @@ def update_reddit_campaign(
     bid_value: float | None = None,
     start_time: str = "",
     end_time: str = "",
+    schedule: list | None = None,
 ) -> dict:
-    """Draft campaign setting changes. Budget/bid fields only apply to CBO campaigns."""
+    """Draft campaign setting changes. Budget/bid/schedule fields only apply to CBO campaigns."""
     blocked = _guard("update_reddit_campaign", config)
     if blocked:
         return blocked
@@ -327,6 +334,7 @@ def update_reddit_campaign(
         errors.append(f"bid_strategy must be one of {sorted(_CAMPAIGN_BID_STRATEGIES)}")
     if bid_type and bid_type not in _BID_TYPES:
         errors.append(f"bid_type must be one of {sorted(_BID_TYPES)}")
+    schedule_blocks = parse_schedule(schedule, errors)
     if errors:
         return _validation_error(errors)
 
@@ -335,6 +343,11 @@ def update_reddit_campaign(
         return {"error": f"Reddit campaign '{campaign_id}' was not found."}
     meta = account_meta(config, account)
     is_cbo = bool(current.get("is_campaign_budget_optimization"))
+    if schedule_blocks is not None and not is_cbo:
+        errors.append(
+            "A campaign schedule only exists with campaign budget optimization; "
+            "set the schedule on each ad group with update_reddit_ad_group."
+        )
 
     goal_type, goal_value, daily_equivalent = _daily_equivalent(
         daily_budget=daily_budget, lifetime_budget=lifetime_budget,
@@ -395,6 +408,12 @@ def update_reddit_campaign(
     if end_time:
         patch["end_time"] = end_time
         display["end_time"] = {"from": current.get("end_time"), "to": end_time}
+    if schedule_blocks is not None:
+        patch["schedule"] = schedule_blocks
+        display["schedule"] = {
+            "from": describe_schedule(current.get("schedule")),
+            "to": describe_schedule(schedule_blocks),
+        }
     if errors:
         return _validation_error(errors)
     if not patch:
@@ -408,6 +427,8 @@ def update_reddit_campaign(
             "update", current_budget=display["budget"]["from"], proposed_budget=goal_value
         ):
             warnings.append("Budget increase exceeds 50% — confirm the new amount with the user.")
+    if schedule_blocks is not None:
+        warnings.append(_SCHEDULE_NOTE + " A campaign schedule replaces every ad group's.")
     return _store(
         {
             "operation": "reddit_update_campaign",
@@ -504,8 +525,9 @@ def update_reddit_ad_group(
     gender: str = "",
     platforms: list | None = None,
     expand_targeting: bool | None = None,
+    schedule: list | None = None,
 ) -> dict:
-    """Draft ad group changes: budget, bid, schedule, targeting (lists REPLACE)."""
+    """Draft ad group changes: budget, bid, run dates, weekly schedule, targeting (lists REPLACE)."""
     blocked = _guard("update_reddit_ad_group", config)
     if blocked:
         return blocked
@@ -528,6 +550,7 @@ def update_reddit_ad_group(
         errors.append(f"bid_strategy must be one of {sorted(_AD_GROUP_BID_STRATEGIES)}")
     if bid_type and bid_type not in _BID_TYPES:
         errors.append(f"bid_type must be one of {sorted(_BID_TYPES)}")
+    schedule_blocks = parse_schedule(schedule, errors)
     targeting = _targeting_payload(
         geolocations=geolocations, excluded_geolocations=excluded_geolocations,
         communities=communities, excluded_communities=excluded_communities,
@@ -553,6 +576,11 @@ def update_reddit_ad_group(
         errors.append(
             "This ad group belongs to a campaign-budget-optimization campaign; "
             "set the budget with update_reddit_campaign instead."
+        )
+    if schedule_blocks is not None and is_cbo:
+        errors.append(
+            "This ad group belongs to a campaign-budget-optimization campaign, "
+            "whose schedule overrides every ad group; set it with update_reddit_campaign."
         )
     if errors:
         return _validation_error(errors)
@@ -596,6 +624,12 @@ def update_reddit_ad_group(
     if end_time:
         patch["end_time"] = end_time
         display["end_time"] = {"from": current.get("end_time"), "to": end_time}
+    if schedule_blocks is not None:
+        patch["schedule"] = schedule_blocks
+        display["schedule"] = {
+            "from": describe_schedule(current.get("schedule")),
+            "to": describe_schedule(schedule_blocks),
+        }
     if targeting:
         merged = dict(current.get("targeting") or {})
         merged.update(targeting)
@@ -622,6 +656,8 @@ def update_reddit_ad_group(
             "Targeting lists REPLACE the current values for the keys you passed "
             "(other keys are preserved). Pass the full desired list."
         )
+    if schedule_blocks is not None:
+        warnings.append(_SCHEDULE_NOTE)
     return _store(
         {
             "operation": "reddit_update_ad_group",
@@ -752,8 +788,9 @@ def draft_reddit_campaign(
     spend_cap: float | None = None,
     start_time: str = "",
     end_time: str = "",
+    schedule: list | None = None,
 ) -> dict:
-    """Draft a new campaign (created PAUSED). Budget lives on ad groups unless CBO."""
+    """Draft a new campaign (created PAUSED). Budget and schedule live on ad groups unless CBO."""
     blocked = _guard("draft_reddit_campaign", config)
     if blocked:
         return blocked
@@ -761,6 +798,12 @@ def draft_reddit_campaign(
 
     errors: list[str] = []
     warnings: list[str] = []
+    schedule_blocks = parse_schedule(schedule, errors)
+    if schedule_blocks and not campaign_budget_optimization:
+        errors.append(
+            "A campaign schedule only exists with campaign_budget_optimization=true; "
+            "otherwise set the schedule on each ad group (draft_reddit_ad_group)."
+        )
     campaign_name = (campaign_name or "").strip()
     if not campaign_name:
         errors.append("campaign_name is required")
@@ -861,6 +904,9 @@ def draft_reddit_campaign(
         payload["start_time"] = start_time
     if end_time:
         payload["end_time"] = end_time
+    if schedule_blocks:
+        payload["schedule"] = schedule_blocks
+        warnings.append(_SCHEDULE_NOTE + " A campaign schedule replaces every ad group's.")
 
     if objective == "CONVERSIONS":
         warnings.append(
@@ -919,8 +965,9 @@ def draft_reddit_ad_group(
     expand_targeting: bool | None = None,
     start_time: str = "",
     end_time: str = "",
+    schedule: list | None = None,
 ) -> dict:
-    """Draft a new ad group (created PAUSED) with budget, bid, pixel and targeting."""
+    """Draft a new ad group (created PAUSED) with budget, bid, pixel, schedule and targeting."""
     blocked = _guard("draft_reddit_ad_group", config)
     if blocked:
         return blocked
@@ -928,6 +975,7 @@ def draft_reddit_ad_group(
 
     errors: list[str] = []
     warnings: list[str] = []
+    schedule_blocks = parse_schedule(schedule, errors)
     campaign_id = (campaign_id or "").strip()
     if not campaign_id:
         errors.append("campaign_id is required (see get_reddit_campaigns)")
@@ -989,6 +1037,11 @@ def draft_reddit_ad_group(
             errors.append(
                 "The campaign uses campaign budget optimization; the budget is set "
                 "on the campaign, not the ad group."
+            )
+        if schedule_blocks:
+            errors.append(
+                "The campaign uses campaign budget optimization; its schedule "
+                "overrides every ad group. Set it with update_reddit_campaign."
             )
         if bid_strategy and bid_strategy != campaign.get("bid_strategy"):
             errors.append(
@@ -1060,6 +1113,9 @@ def draft_reddit_ad_group(
     payload["start_time"] = start_time or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     if end_time:
         payload["end_time"] = end_time
+    if schedule_blocks:
+        payload["schedule"] = schedule_blocks
+        warnings.append(_SCHEDULE_NOTE)
 
     if targeting.get("geolocations") and not targeting.get("languages"):
         warnings.append(
@@ -1093,6 +1149,7 @@ def draft_reddit_ad_group(
                         "value": bid_value,
                     },
                     "targeting": targeting,
+                    "schedule": describe_schedule(schedule_blocks),
                     "currency": meta["currency"],
                     "status_on_create": "PAUSED",
                 },
