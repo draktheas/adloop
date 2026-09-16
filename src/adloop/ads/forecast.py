@@ -226,7 +226,7 @@ def _build_keyword_ideas_rest_body(
 ) -> dict:
     """Build the JSON body for the REST generateKeywordIdeas endpoint.
 
-    Schema follows google-ads REST v24 (camelCase). Exactly one of
+    Schema follows the pinned google-ads REST version (camelCase; unchanged v24 → v25). Exactly one of
     ``keywordSeed`` / ``urlSeed`` / ``keywordAndUrlSeed`` is set based on
     which inputs were provided.
     """
