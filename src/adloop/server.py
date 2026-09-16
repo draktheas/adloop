@@ -251,26 +251,36 @@ def _structured_error(fn_name: str, exc: Exception) -> dict:
     err = str(exc)
     err_lower = err.lower()
 
-    if "developer_token_not_approved" in err_lower or "only approved for use with test accounts" in err_lower:
+    # Access levels belong to the Google Cloud project that owns the OAuth
+    # client (developer tokens were sunset on 2026-09-09). v25+ names the
+    # project; older API versions still answer with the token wording.
+    if (
+        "cloud_project_not_approved_for_production" in err_lower
+        or "developer_token_not_approved" in err_lower
+        or "only approved for use with test accounts" in err_lower
+    ):
         return {
             "error": (
-                "Google Ads authorization failed — developer token is not "
-                "approved for production accounts."
+                "Google Ads authorization failed — your Google Cloud project's "
+                "API access level (Test) cannot reach production accounts."
             ),
             "hint": (
-                "This developer token can only access Google Ads test accounts. "
-                "Apply for Basic or Standard access in the Google Ads API Center, "
-                "or switch AdLoop to a test account."
+                "Open the project's Google Ads API Overview page "
+                "(https://console.cloud.google.com/google/ads-apis/overview) and "
+                "apply for Explorer access (usually granted automatically) or "
+                "Basic access (needs the OAuth consent screen brand-verified: "
+                "External and In production). Or switch AdLoop to a test account."
             ),
-            "auth_error": "DEVELOPER_TOKEN_NOT_APPROVED",
+            "auth_error": "CLOUD_PROJECT_NOT_APPROVED_FOR_PRODUCTION",
         }
 
     if "developer_token_invalid" in err_lower or "developer token is not valid" in err_lower:
         return {
-            "error": "Google Ads authentication failed — developer token is invalid.",
+            "error": "Google Ads authentication failed — the configured developer token is invalid.",
             "hint": (
-                "Update `ads.developer_token` in `~/.adloop/config.yaml` with "
-                "the token from your Google Ads manager account API Center. "
+                "Since September 2026 no developer token is needed: remove "
+                "`ads.developer_token` from `~/.adloop/config.yaml`. API access "
+                "belongs to the Google Cloud project that owns your OAuth client. "
                 "OAuth is working if GA4 tools succeed."
             ),
             "auth_error": "DEVELOPER_TOKEN_INVALID",

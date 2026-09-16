@@ -272,10 +272,9 @@ def _post_keyword_ideas_rest_page(
     credentials = get_ads_credentials(config)
     session = AuthorizedSession(credentials)
 
-    headers = {
-        "developer-token": config.ads.developer_token,
-        "Content-Type": "application/json",
-    }
+    headers = {"Content-Type": "application/json"}
+    if config.ads.developer_token:
+        headers["developer-token"] = config.ads.developer_token
     if config.ads.login_customer_id:
         headers["login-customer-id"] = config.ads.login_customer_id.replace("-", "")
 

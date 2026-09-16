@@ -33,9 +33,13 @@ _GOOGLE_CLOUD_INSTRUCTIONS = """\
 │     → https://console.cloud.google.com/apis/credentials         │
 │     Download the JSON file.                                     │
 │                                                                 │
-│  5. Get your Google Ads Developer Token from your MCC account   │
-│     → https://ads.google.com/aw/apicenter                      │
-│     (You need a Manager Account / MCC)                          │
+│  5. Apply for Google Ads API access ON THE PROJECT              │
+│     → https://console.cloud.google.com/google/ads-apis/overview │
+│     New projects start at Test level (test accounts only).      │
+│     "Upgrade access level": Explorer is granted automatically   │
+│     (2,880 ops/day); Basic (15,000/day) needs the consent       │
+│     screen published ("In production") first.                   │
+│     No manager account (MCC) and no developer token needed.     │
 └─────────────────────────────────────────────────────────────────┘
 """
 
@@ -77,9 +81,11 @@ def _validate_customer_id(raw: str) -> str | None:
     return None
 
 
-def _prompt_customer_id(label: str, default: str = "") -> str:
+def _prompt_customer_id(label: str, default: str = "", required: bool = True) -> str:
     while True:
-        value = _prompt(label, default=default)
+        value = _prompt(label, default=default, required=required)
+        if not value and not required:
+            return ""
         formatted = _format_customer_id(value)
         err = _validate_customer_id(formatted)
         if err:
@@ -183,9 +189,10 @@ def _generate_config_yaml(
         f'  property_id: "{property_id}"',
         "",
         "ads:",
+        "  # Legacy; API access comes from the Google Cloud project since 2026-09.",
         f'  developer_token: "{developer_token}"',
         f'  customer_id: "{customer_id}"',
-        "  # MCC / Manager Account ID (required if using a manager account)",
+        "  # MCC / Manager Account ID (only if using a manager account)",
         f'  login_customer_id: "{login_customer_id}"',
         "",
         "gsc:",
@@ -604,23 +611,29 @@ def run_init_wizard() -> None:
     )
 
     step_num = 4
-    _step_header(step_num, "Google Ads Developer Token")
-    _print("  Find your developer token in your MCC account:")
-    _print("  → https://ads.google.com/aw/apicenter")
+    _step_header(step_num, "Google Ads API access")
+    _print("  Since September 2026 API access belongs to your Google Cloud")
+    _print("  project, not to a developer token. Apply on the project's page:")
+    _print("  → https://console.cloud.google.com/google/ads-apis/overview")
+    _print("  Leave the token empty unless you still run an old setup.")
     _print()
     developer_token = _prompt(
-        "Developer Token",
+        "Developer token (legacy, optional)",
         default=_existing("ads", "developer_token"),
+        required=False,
     )
 
-    # MCC Account ID (needed before auto-discovery for Ads API calls)
+    # Manager account: optional since access no longer comes from an MCC.
+    # Still needed to reach several accounts through one login.
     step_num += 1
-    _step_header(step_num, "MCC / Manager Account")
-    _print("  Your MCC (Manager) account ID is in the top bar of your MCC.")
+    _step_header(step_num, "Manager Account (MCC), optional")
+    _print("  Only if you manage several accounts through a manager account:")
+    _print("  its ID is in the top bar of the MCC. Leave empty otherwise.")
     _print()
     login_customer_id = _prompt_customer_id(
         "MCC Account ID (XXX-XXX-XXXX)",
         default=_existing("ads", "login_customer_id"),
+        required=False,
     )
 
     # OAuth + auto-discovery

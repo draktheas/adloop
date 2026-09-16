@@ -28,10 +28,15 @@ def get_ads_client(config: AdLoopConfig) -> GoogleAdsClient:
     credentials = get_ads_credentials(config)
 
     client_config = {
-        "developer_token": config.ads.developer_token,
         "use_proto_plus": True,
         "version": GOOGLE_ADS_API_VERSION,
     }
+
+    # Access levels live on the Google Cloud project that owns the OAuth
+    # client since 2026-09-09; the developer token header is optional and
+    # ignored by the API. Send it only when someone still has one configured.
+    if config.ads.developer_token:
+        client_config["developer_token"] = config.ads.developer_token
 
     if config.ads.login_customer_id:
         client_config["login_customer_id"] = config.ads.login_customer_id.replace("-", "")

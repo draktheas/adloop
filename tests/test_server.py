@@ -47,25 +47,31 @@ def test_structured_error_detects_invalid_developer_token():
 
     result = _structured_error("list_accounts", error)
 
-    assert result["error"] == "Google Ads authentication failed — developer token is invalid."
+    assert result["error"] == "Google Ads authentication failed — the configured developer token is invalid."
     assert result["auth_error"] == "DEVELOPER_TOKEN_INVALID"
-    assert "ads.developer_token" in result["hint"]
+    # The fix is to drop the token, not to replace it.
+    assert "remove `ads.developer_token`" in result["hint"]
 
 
-def test_structured_error_detects_test_only_developer_token():
-    error = Exception(
-        "errors { error_code { authorization_error: DEVELOPER_TOKEN_NOT_APPROVED } "
-        'message: "The developer token is only approved for use with test accounts." }'
-    )
+def test_structured_error_points_test_level_projects_at_the_cloud_console():
+    # v25+ names the project; older API versions keep the token wording.
+    # Both mean the same thing since developer tokens were sunset.
+    for error in (
+        Exception(
+            "errors { error_code { authorization_error: CLOUD_PROJECT_NOT_APPROVED_FOR_PRODUCTION } "
+            'message: "The Google Cloud project is not approved for production accounts." }'
+        ),
+        Exception(
+            "errors { error_code { authorization_error: DEVELOPER_TOKEN_NOT_APPROVED } "
+            'message: "The developer token is only approved for use with test accounts." }'
+        ),
+    ):
+        result = _structured_error("list_accounts", error)
 
-    result = _structured_error("list_accounts", error)
-
-    assert result["error"] == (
-        "Google Ads authorization failed — developer token is not approved "
-        "for production accounts."
-    )
-    assert result["auth_error"] == "DEVELOPER_TOKEN_NOT_APPROVED"
-    assert "test accounts" in result["hint"]
+        assert result["auth_error"] == "CLOUD_PROJECT_NOT_APPROVED_FOR_PRODUCTION"
+        assert "access level (Test)" in result["error"]
+        assert "console.cloud.google.com/google/ads-apis/overview" in result["hint"]
+        assert "Explorer" in result["hint"]
 
 
 def test_structured_error_detects_revoked_oauth_token():
@@ -90,16 +96,18 @@ def test_parse_gaql_error_detects_invalid_developer_token():
     assert "ads.developer_token" in result
 
 
-def test_parse_gaql_error_detects_test_only_developer_token():
-    error = Exception(
-        "errors { error_code { authorization_error: DEVELOPER_TOKEN_NOT_APPROVED } "
-        'message: "The developer token is only approved for use with test accounts." }'
-    )
+def test_parse_gaql_error_points_test_level_access_at_the_cloud_console():
+    for code in ("DEVELOPER_TOKEN_NOT_APPROVED", "CLOUD_PROJECT_NOT_APPROVED_FOR_PRODUCTION"):
+        error = Exception(
+            f"errors {{ error_code {{ authorization_error: {code} }} "
+            'message: "Not approved for production accounts." }'
+        )
 
-    result = _parse_gaql_error(error)
+        result = _parse_gaql_error(error)
 
-    assert result.startswith("DEVELOPER_TOKEN_NOT_APPROVED:")
-    assert "test accounts" in result
+        assert result.startswith(f"{code}:")
+        assert "Google Ads API Overview" in result
+        assert "production" in result
 
 
 # ---------------------------------------------------------------------------

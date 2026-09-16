@@ -1,7 +1,7 @@
 # AdLoop configuration
 # Copy this file to ~/.adloop/config.yaml and fill in your values.
 #
-# Most users only need to set: developer_token, customer_id, login_customer_id.
+# Most users only need to set: customer_id (and login_customer_id with an MCC).
 # The setup wizard (adloop init) handles everything automatically.
 #
 # See README.md for detailed setup instructions.
@@ -22,10 +22,11 @@ ga4:
   property_id: ""
 
 ads:
-  # Google Ads API developer token.
-  # Find it in your MCC account → Tools & Settings → API Center.
-  # Explorer access (automatic) gives 2,880 operations/day.
-  # Apply for Basic access for 15,000 operations/day.
+  # Google Ads API access belongs to the Google Cloud project that owns your
+  # OAuth client (developer tokens were sunset in September 2026). Apply on
+  # the project's Google Ads API Overview page in the Cloud Console:
+  # Explorer (granted automatically) gives 2,880 operations/day, Basic
+  # 15,000/day. Leave the legacy token empty; it is ignored by the API.
   developer_token: ""
 
   # Default Google Ads customer ID (e.g. "123-456-7890").

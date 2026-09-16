@@ -95,3 +95,29 @@ class TestBlankValuesFallBackToDefaults:
 
         path = self._write(tmp_path, "ads:\n  customer_id: 1234567890\n")
         assert load_config(str(path)).ads.customer_id == "1234567890"
+
+
+def test_ads_client_omits_the_developer_token_when_none_is_configured(monkeypatch):
+    """Access levels belong to the Cloud project since 2026-09-09; a config
+    without a token must not send an empty header, and one with a legacy
+    token keeps sending it."""
+    from adloop import config as config_module
+    from adloop.ads import client as ads_client
+
+    captured: list[dict] = []
+
+    class FakeClient:
+        def __init__(self, credentials=None, **kwargs):
+            captured.append(kwargs)
+
+    monkeypatch.setattr("google.ads.googleads.client.GoogleAdsClient", FakeClient)
+    monkeypatch.setattr(ads_client, "get_ads_credentials", lambda cfg: object(), raising=False)
+    monkeypatch.setattr("adloop.auth.get_ads_credentials", lambda cfg: object())
+
+    ads_client.get_ads_client(config_module.AdLoopConfig())
+    assert "developer_token" not in captured[-1]
+
+    ads_client.get_ads_client(
+        config_module.AdLoopConfig(ads=config_module.AdsConfig(developer_token="legacy"))
+    )
+    assert captured[-1]["developer_token"] == "legacy"
