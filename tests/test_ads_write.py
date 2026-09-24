@@ -1823,6 +1823,66 @@ class TestListAccounts:
         # The probe should request limit + 1 to detect truncation cleanly.
         assert "LIMIT 1001" in captured["query"]
 
+    def test_discovers_direct_accounts_without_configured_ids(self, monkeypatch):
+        config = self._make_config(login_customer_id="")
+        config.ads.customer_id = ""
+        customer_service = SimpleNamespace(
+            list_accessible_customers=lambda: SimpleNamespace(
+                resource_names=["customers/1234567890", "customers/9876543210"]
+            )
+        )
+        client = SimpleNamespace(
+            get_service=lambda name: customer_service
+            if name == "CustomerService"
+            else None
+        )
+        monkeypatch.setattr("adloop.ads.client.get_ads_client", lambda _cfg: client)
+
+        queried_ids = []
+
+        def fake_execute(_config, customer_id, query):
+            queried_ids.append(customer_id)
+            return [{
+                "customer.id": customer_id,
+                "customer.descriptive_name": f"Account {customer_id}",
+                "customer.status": "ENABLED",
+                "customer.manager": False,
+            }]
+
+        monkeypatch.setattr("adloop.ads.gaql.execute_query", fake_execute)
+
+        result = read.list_accounts(config)
+
+        assert queried_ids == ["1234567890", "9876543210"]
+        assert [row["customer.id"] for row in result["accounts"]] == queried_ids
+        assert result["total_accounts"] == 2
+        assert "truncated" not in result
+
+    def test_direct_discovery_honors_limit(self, monkeypatch):
+        config = self._make_config(login_customer_id="")
+        config.ads.customer_id = ""
+        customer_service = SimpleNamespace(
+            list_accessible_customers=lambda: SimpleNamespace(
+                resource_names=["customers/111", "customers/222"]
+            )
+        )
+        client = SimpleNamespace(get_service=lambda _name: customer_service)
+        monkeypatch.setattr("adloop.ads.client.get_ads_client", lambda _cfg: client)
+
+        queried_ids = []
+
+        def fake_execute(_config, customer_id, query):
+            queried_ids.append(customer_id)
+            return [{"customer.id": customer_id}]
+
+        monkeypatch.setattr("adloop.ads.gaql.execute_query", fake_execute)
+
+        result = read.list_accounts(config, limit=1)
+
+        assert queried_ids == ["111"]
+        assert result["total_accounts"] == 1
+        assert result["truncated"] is True
+
 
 class TestConfirmAndApplyDryRunOverride:
     """Regression tests for GitHub issue #19.

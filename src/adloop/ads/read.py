@@ -23,6 +23,7 @@ def list_accounts(config: AdLoopConfig, *, limit: int = 200) -> dict:
     """
     from adloop.ads.gaql import execute_query
 
+    truncated = False
     mcc_id = config.ads.login_customer_id
     if mcc_id:
         query = f"""
@@ -32,7 +33,7 @@ def list_accounts(config: AdLoopConfig, *, limit: int = 200) -> dict:
             LIMIT {int(limit) + 1}
         """
         rows = execute_query(config, mcc_id, query)
-    else:
+    elif config.ads.customer_id:
         query = """
             SELECT customer.id, customer.descriptive_name,
                    customer.status, customer.manager
@@ -40,9 +41,31 @@ def list_accounts(config: AdLoopConfig, *, limit: int = 200) -> dict:
             LIMIT 1
         """
         rows = execute_query(config, config.ads.customer_id, query)
+    else:
+        # During `adloop init` there is no customer ID yet. Bootstrap account
+        # discovery with the one Google Ads request that does not require one,
+        # then query each directly accessible account for its display metadata.
+        from adloop.ads.client import get_ads_client
 
-    truncated = len(rows) > limit
-    if truncated:
+        client = get_ads_client(config)
+        service = client.get_service("CustomerService")
+        response = service.list_accessible_customers()
+        resource_names = list(response.resource_names)
+        truncated = len(resource_names) > limit
+
+        query = """
+            SELECT customer.id, customer.descriptive_name,
+                   customer.status, customer.manager
+            FROM customer
+            LIMIT 1
+        """
+        rows = []
+        for resource_name in resource_names[:limit]:
+            customer_id = resource_name.rsplit("/", 1)[-1]
+            rows.extend(execute_query(config, customer_id, query))
+
+    if len(rows) > limit:
+        truncated = True
         rows = rows[:limit]
 
     result: dict = {"accounts": rows, "total_accounts": len(rows)}
