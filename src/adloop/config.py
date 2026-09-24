@@ -136,7 +136,7 @@ def load_config(config_path: str | None = None) -> AdLoopConfig:
     if not path.exists():
         return AdLoopConfig(source_path=resolved)
 
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
 
     google_raw = raw.get("google", {})

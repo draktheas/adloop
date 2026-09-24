@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
 import yaml
 
 from adloop.cli import _generate_config_yaml
@@ -54,6 +57,60 @@ class TestGenerateConfigYaml:
         assert "credentials_path resolved from" in text
         parsed = yaml.safe_load(text)
         assert "credentials_path" not in parsed.get("google", {})
+
+
+def test_init_wizard_uses_utf8_and_restores_config_on_cancel(
+    monkeypatch, tmp_path
+):
+    """Config I/O must not fall back to Windows' cp1252 encoding."""
+    from adloop import cli
+
+    adloop_dir = tmp_path / ".adloop"
+    config_path = adloop_dir / "config.yaml"
+    original = "# Existing config with Unicode: 😀\n"
+    adloop_dir.mkdir()
+    config_path.write_bytes(original.encode("utf-8"))
+
+    original_read_text = Path.read_text
+    original_write_text = Path.write_text
+    config_reads: list[str | None] = []
+    config_writes: list[str | None] = []
+
+    def read_text(path, *args, **kwargs):
+        if path == config_path:
+            config_reads.append(kwargs.get("encoding"))
+        return original_read_text(path, *args, **kwargs)
+
+    def write_text(path, data, *args, **kwargs):
+        if path == config_path:
+            config_writes.append(kwargs.get("encoding"))
+        return original_write_text(path, data, *args, **kwargs)
+
+    def cancel_after_temp_config(**kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    monkeypatch.setattr(Path, "write_text", write_text)
+    monkeypatch.setattr(cli, "_ADLOOP_DIR", adloop_dir)
+    monkeypatch.setattr(cli, "_CONFIG_PATH", config_path)
+    monkeypatch.setattr(cli, "_prompt_bool", lambda *args, **kwargs: True)
+    monkeypatch.setattr(cli, "_prompt_credentials_path", lambda **kwargs: "")
+    monkeypatch.setattr(
+        cli,
+        "_prompt",
+        lambda label, **kwargs: "project-id" if "Project ID" in label else "",
+    )
+    monkeypatch.setattr(cli, "_prompt_customer_id", lambda *args, **kwargs: "")
+    monkeypatch.setattr(cli, "_run_wizard_post_config", cancel_after_temp_config)
+    monkeypatch.setattr("builtins.input", lambda *args: "")
+
+    with pytest.raises(KeyboardInterrupt):
+        cli.run_init_wizard()
+
+    assert config_reads == ["utf-8"]
+    assert config_writes == ["utf-8", "utf-8"]
+    assert original_read_text(config_path, encoding="utf-8") == original
+
 
 class TestToolsetSnippets:
     """MCP client snippets must carry ADLOOP_TOOLSETS when a subset is chosen."""
@@ -168,7 +225,7 @@ class TestGenerateConfigYamlOptionalServices:
             reddit_username="daniel",
         )
         path = tmp_path / "config.yaml"
-        path.write_text(content)
+        path.write_text(content, encoding="utf-8")
         cfg = load_config(str(path))
         assert cfg.reddit.client_id == "app-id"
         assert cfg.reddit.client_secret == "app-secret"

@@ -570,7 +570,7 @@ def run_init_wizard() -> None:
         if not _prompt_bool("Overwrite existing configuration?", default=False):
             _print("  Keeping existing config. Exiting.")
             return
-        _original_config_backup = _CONFIG_PATH.read_text()
+        _original_config_backup = _CONFIG_PATH.read_text(encoding="utf-8")
         try:
             import yaml
 
@@ -653,7 +653,7 @@ def run_init_wizard() -> None:
         max_daily_budget=50.0,
         require_dry_run=True,
     )
-    _CONFIG_PATH.write_text(temp_config_yaml)
+    _CONFIG_PATH.write_text(temp_config_yaml, encoding="utf-8")
 
     # Everything below uses the temp config for OAuth and discovery.
     # If the wizard is interrupted, restore the original config (or remove
@@ -669,7 +669,7 @@ def run_init_wizard() -> None:
         )
     except KeyboardInterrupt:
         if _original_config_backup is not None:
-            _CONFIG_PATH.write_text(_original_config_backup)
+            _CONFIG_PATH.write_text(_original_config_backup, encoding="utf-8")
         elif _CONFIG_PATH.exists():
             _CONFIG_PATH.unlink()
         raise
@@ -850,7 +850,7 @@ def _run_wizard_post_config(
         reddit_ad_account_id=reddit_values["ad_account_id"],
         reddit_username=reddit_values["username"],
     )
-    _CONFIG_PATH.write_text(config_yaml)
+    _CONFIG_PATH.write_text(config_yaml, encoding="utf-8")
     _print(f"  ✓ Config written to {_CONFIG_PATH}")
 
     # Toolset subset (optional, client-side env)
