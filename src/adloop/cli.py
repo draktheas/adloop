@@ -113,6 +113,10 @@ def _prompt_credentials_path(default: str = "~/.adloop/credentials.json") -> str
             if not retry:
                 return value
             continue
+        # The MCP server runs from an arbitrary working directory, so a
+        # relative path that resolves here would break there.
+        if not Path(value).expanduser().is_absolute():
+            return str(Path(value).resolve())
         return value
 
 

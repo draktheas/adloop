@@ -59,6 +59,33 @@ class TestGenerateConfigYaml:
         assert "credentials_path" not in parsed.get("google", {})
 
 
+class TestPromptCredentialsPath:
+    """The MCP server's working directory differs from the wizard's, so the
+    stored credentials path must never depend on the wizard's cwd."""
+
+    def test_relative_path_is_made_absolute(self, monkeypatch, tmp_path):
+        from adloop import cli
+
+        (tmp_path / "client-secret.json").write_text("{}")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(cli, "_prompt", lambda *a, **k: "./client-secret.json")
+
+        result = cli._prompt_credentials_path()
+
+        assert Path(result).is_absolute()
+        assert Path(result) == (tmp_path / "client-secret.json").resolve()
+
+    def test_home_relative_path_is_kept(self, monkeypatch, tmp_path):
+        from adloop import cli
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
+        (tmp_path / "creds.json").write_text("{}")
+        monkeypatch.setattr(cli, "_prompt", lambda *a, **k: "~/creds.json")
+
+        assert cli._prompt_credentials_path() == "~/creds.json"
+
+
 def test_init_wizard_uses_utf8_and_restores_config_on_cancel(
     monkeypatch, tmp_path
 ):
