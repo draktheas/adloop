@@ -1800,10 +1800,15 @@ def draft_keywords(
     ad_group_id: str,
     keywords: _DictList,
     customer_id: str = "",
+    exempt_policy_violations: _StrList = [],  # noqa: B006
 ) -> dict:
     """Draft keyword additions — returns a PREVIEW, does NOT add keywords.
 
     keywords: list of {"text": "keyword phrase", "match_type": "EXACT|PHRASE|BROAD"}
+    exempt_policy_violations: Google policy names to request an exemption
+        for, e.g. ["HEALTH_IN_PERSONALIZED_ADS"]. Use only when a dry run
+        reported the violation as exemptible AND the user approved
+        requesting the exemption.
     Call confirm_and_apply with the returned plan_id to execute.
     """
     from adloop.ads.write import draft_keywords as _impl
@@ -1813,6 +1818,7 @@ def draft_keywords(
         customer_id=customer_id or current_config().ads.customer_id,
         ad_group_id=ad_group_id,
         keywords=keywords,
+        exempt_policy_violations=exempt_policy_violations,
     )
 
 
@@ -2272,6 +2278,14 @@ def confirm_and_apply(
     for AdLoop Cloud tenants), dry_run=false is REFUSED with status
     DRY_RUN_REQUIRED until this plan_id has completed one dry_run=true
     pass. Run the dry run, show it to the user, then apply for real.
+
+    Google Ads plans: the dry run sends the change to Google with
+    validate_only set, so policy and validation errors surface here as
+    DRY_RUN_FAILED without changing anything. Policy errors come with
+    `policy_violations`; when Google marks one exemptible, follow the
+    `hint` (ask the user before requesting any exemption). Multi-step
+    plans validate their first request only. GA4 key-event plans are not
+    checked (GA4 has no validate-only mode).
 
     Reddit plans: Reddit has no validate-only mode, so the dry run re-reads
     the target entity and re-checks the safety caps (returned as `checks`);

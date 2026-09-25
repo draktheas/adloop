@@ -1893,6 +1893,10 @@ class TestConfirmAndApplyDryRunOverride:
     do not get stuck in retry loops.
     """
 
+    @pytest.fixture(autouse=True)
+    def _google_accepts(self, monkeypatch):
+        monkeypatch.setattr(write, "_validate_with_google", lambda *_: None)
+
     def _stage_plan(self) -> str:
         plan = preview_store.ChangePlan(
             operation="add_keywords",
@@ -1984,6 +1988,10 @@ class TestTwoPhaseApply:
     plan before dry_run=false is accepted. This makes the preview→confirm
     flow a protocol requirement the calling agent cannot skip (the hosted
     runtime turns it on for all tenants)."""
+
+    @pytest.fixture(autouse=True)
+    def _google_accepts(self, monkeypatch):
+        monkeypatch.setattr(write, "_validate_with_google", lambda *_: None)
 
     def _stage_plan(self) -> str:
         plan = preview_store.ChangePlan(
@@ -2693,3 +2701,313 @@ def test_search_campaigns_get_neither_the_refusal_nor_the_shell_warning():
 
     assert not any("Performance Max" in e for e in errors)
     assert not any("shell only" in w for w in warnings)
+
+
+# ---------------------------------------------------------------------------
+# Dry runs validate with Google; exemptible policy violations
+# ---------------------------------------------------------------------------
+
+
+def _policy_exception(violations: list[tuple[int, str, bool]]) -> Exception:
+    """A GoogleAdsException with one policy error per (index, policy, exemptible)."""
+    from google.ads.googleads.errors import GoogleAdsException
+
+    client = GoogleAdsClient(
+        credentials=None,
+        developer_token="test-token",
+        use_proto_plus=True,
+        version=GOOGLE_ADS_API_VERSION,
+    )
+    failure = client.get_type("GoogleAdsFailure")
+    for index, policy_name, exemptible in violations:
+        error = client.get_type("GoogleAdsError")
+        error.error_code.policy_violation_error = client.get_type(
+            "PolicyViolationErrorEnum"
+        ).PolicyViolationError.POLICY_ERROR
+        error.message = "A policy was violated."
+        error.trigger.string_value = f"keyword {index}"
+        element = client.get_type("ErrorLocation").FieldPathElement(
+            field_name="operations", index=index
+        )
+        error.location.field_path_elements.append(element)
+        details = error.details.policy_violation_details
+        details.key.policy_name = policy_name
+        details.key.violating_text = f"keyword {index}"
+        details.is_exemptible = exemptible
+        details.external_policy_name = "Health in personalized advertising"
+        failure.errors.append(error)
+    return GoogleAdsException(None, None, failure, "req-1")
+
+
+class _FakeCriterionService(_FakePathService):
+    """AdGroupCriterionService fake that speaks both call styles."""
+
+    def __init__(self, validate_error: Exception | None = None):
+        super().__init__("adGroups")
+        self.validate_error = validate_error
+        self.validate_requests: list[dict] = []
+        self.applied_operations: list | None = None
+
+    def mutate_ad_group_criteria(self, request=None, customer_id=None, operations=None):
+        if request is not None:
+            self.validate_requests.append(request)
+            if self.validate_error is not None:
+                raise self.validate_error
+            return SimpleNamespace(results=[])
+        self.applied_operations = operations
+        return SimpleNamespace(
+            results=[
+                SimpleNamespace(resource_name=f"customers/{customer_id}/adGroupCriteria/{i}")
+                for i, _ in enumerate(operations)
+            ]
+        )
+
+
+def _keyword_client(service: _FakeCriterionService) -> _FakeClient:
+    return _FakeClient(
+        {"AdGroupCriterionService": service, "AdGroupService": _FakePathService("adGroups")}
+    )
+
+
+def _stage_keywords_plan(**changes) -> str:
+    plan = preview_store.ChangePlan(
+        operation="add_keywords",
+        entity_type="keyword",
+        customer_id="123-456-7890",
+        changes={
+            "ad_group_id": "2002",
+            "keywords": [
+                {"text": "emdr near me", "match_type": "EXACT"},
+                {"text": "emdr therapy near me", "match_type": "EXACT"},
+            ],
+            **changes,
+        },
+    )
+    preview_store.store_plan(plan)
+    return plan.plan_id
+
+
+@pytest.fixture
+def apply_config(tmp_path) -> AdLoopConfig:
+    return AdLoopConfig(
+        ads=AdsConfig(customer_id="123-456-7890"),
+        safety=SafetyConfig(require_dry_run=False, log_file=str(tmp_path / "audit.log")),
+    )
+
+
+class TestValidateOnlyService:
+    def test_mutate_is_sent_validate_only_and_stops_the_handler(self):
+        service = _FakeCriterionService()
+        proxy = write._ValidateOnlyService(service)
+
+        with pytest.raises(write._ValidationPassed):
+            proxy.mutate_ad_group_criteria(customer_id="1", operations=["op"])
+
+        assert service.validate_requests == [
+            {"customer_id": "1", "operations": ["op"], "validate_only": True}
+        ]
+        assert service.applied_operations is None
+
+    def test_handler_probe_passes_through(self):
+        service = _FakeCriterionService()
+        proxy = write._ValidateOnlyService(service)
+
+        response = proxy.mutate_ad_group_criteria(
+            request={"customer_id": "1", "operations": [], "validate_only": True}
+        )
+
+        assert response.results == []
+
+    def test_non_mutate_attributes_are_untouched(self):
+        proxy = write._ValidateOnlyService(_FakeCriterionService())
+
+        assert proxy.ad_group_path("1", "2") == "customers/1/adGroups/2"
+
+
+class TestDryRunValidatesWithGoogle:
+    def test_accepted_change_is_validated_and_marked(self, apply_config, monkeypatch):
+        service = _FakeCriterionService()
+        monkeypatch.setattr(
+            "adloop.ads.client.get_ads_client", lambda _cfg: _keyword_client(service)
+        )
+        plan_id = _stage_keywords_plan()
+
+        result = write.confirm_and_apply(apply_config, plan_id=plan_id, dry_run=True)
+
+        assert result["status"] == "DRY_RUN_SUCCESS"
+        assert result["validated_with_google"] is True
+        assert len(service.validate_requests) == 1
+        assert service.validate_requests[0]["validate_only"] is True
+        assert service.applied_operations is None
+        assert preview_store.get_plan(plan_id).dry_run_result is not None
+
+    def test_policy_rejection_fails_the_dry_run(self, apply_config, monkeypatch):
+        from pathlib import Path
+
+        service = _FakeCriterionService(
+            validate_error=_policy_exception(
+                [(0, "HEALTH_IN_PERSONALIZED_ADS", True), (1, "HEALTH_IN_PERSONALIZED_ADS", True)]
+            )
+        )
+        monkeypatch.setattr(
+            "adloop.ads.client.get_ads_client", lambda _cfg: _keyword_client(service)
+        )
+        plan_id = _stage_keywords_plan()
+
+        result = write.confirm_and_apply(apply_config, plan_id=plan_id, dry_run=True)
+
+        assert result["status"] == "DRY_RUN_FAILED"
+        assert "policy_violation_error=POLICY_ERROR" in result["error"]
+        assert [v["trigger"] for v in result["policy_violations"]] == [
+            "keyword 0",
+            "keyword 1",
+        ]
+        assert all(v["exemptible"] for v in result["policy_violations"])
+        assert "exempt_policy_violations=['HEALTH_IN_PERSONALIZED_ADS']" in result["hint"]
+        # A failed dry run must not unlock two-phase apply.
+        assert preview_store.get_plan(plan_id).dry_run_result is None
+        assert "dry_run_failed" in Path(apply_config.safety.log_file).read_text()
+
+    def test_partial_failure_result_fails_the_dry_run(self, apply_config, monkeypatch):
+        monkeypatch.setattr(
+            write,
+            "_execute_plan",
+            lambda *_a, **_k: {"partial_failure": True, "error": "duplicate name"},
+        )
+        plan_id = _stage_keywords_plan()
+
+        result = write.confirm_and_apply(apply_config, plan_id=plan_id, dry_run=True)
+
+        assert result["status"] == "DRY_RUN_FAILED"
+        assert result["error"] == "duplicate name"
+
+    def test_ga4_plans_are_not_sent_to_google_ads(self, apply_config, monkeypatch):
+        def _no_client(_cfg):
+            raise AssertionError("GA4 dry runs must not build a Google Ads client")
+
+        monkeypatch.setattr("adloop.ads.client.get_ads_client", _no_client)
+        plan = preview_store.ChangePlan(operation="create_key_event", changes={})
+        preview_store.store_plan(plan)
+
+        result = write.confirm_and_apply(apply_config, plan_id=plan.plan_id, dry_run=True)
+
+        assert result["status"] == "DRY_RUN_SUCCESS"
+        assert result["validated_with_google"] is False
+        assert "GA4" in result["note"]
+
+
+class TestKeywordPolicyExemptions:
+    def test_draft_normalizes_and_flags_the_exemption(self, config, monkeypatch):
+        monkeypatch.setattr(write, "_check_broad_match_safety", lambda *_: [])
+
+        preview = write.draft_keywords(
+            config,
+            customer_id="1234567890",
+            ad_group_id="2002",
+            keywords=[{"text": "emdr near me", "match_type": "EXACT"}],
+            exempt_policy_violations=[" health_in_personalized_ads ", ""],
+        )
+
+        plan = preview_store.get_plan(preview["plan_id"])
+        assert plan.changes["exempt_policy_violations"] == ["HEALTH_IN_PERSONALIZED_ADS"]
+        assert any("exemption" in w for w in preview["warnings"])
+
+    def test_draft_without_exemptions_leaves_changes_unchanged(self, config, monkeypatch):
+        monkeypatch.setattr(write, "_check_broad_match_safety", lambda *_: [])
+
+        preview = write.draft_keywords(
+            config,
+            customer_id="1234567890",
+            ad_group_id="2002",
+            keywords=[{"text": "emdr near me", "match_type": "EXACT"}],
+        )
+
+        plan = preview_store.get_plan(preview["plan_id"])
+        assert "exempt_policy_violations" not in plan.changes
+
+    def test_apply_attaches_keys_for_approved_exemptible_policies_only(self):
+        service = _FakeCriterionService(
+            validate_error=_policy_exception(
+                [(0, "HEALTH_IN_PERSONALIZED_ADS", True), (1, "OTHER_POLICY", True)]
+            )
+        )
+        changes = {
+            "ad_group_id": "2002",
+            "keywords": [
+                {"text": "emdr near me", "match_type": "EXACT"},
+                {"text": "emdr therapy near me", "match_type": "EXACT"},
+            ],
+            "exempt_policy_violations": ["HEALTH_IN_PERSONALIZED_ADS"],
+        }
+
+        result = write._apply_add_keywords(_keyword_client(service), "1234567890", changes)
+
+        ops = service.applied_operations
+        assert [k.policy_name for k in ops[0].exempt_policy_violation_keys] == [
+            "HEALTH_IN_PERSONALIZED_ADS"
+        ]
+        assert [k.violating_text for k in ops[0].exempt_policy_violation_keys] == [
+            "keyword 0"
+        ]
+        assert list(ops[1].exempt_policy_violation_keys) == []
+        assert len(result["resource_names"]) == 2
+
+    def test_apply_ignores_non_exemptible_violations(self):
+        service = _FakeCriterionService(
+            validate_error=_policy_exception([(0, "HEALTH_IN_PERSONALIZED_ADS", False)])
+        )
+        changes = {
+            "ad_group_id": "2002",
+            "keywords": [{"text": "emdr near me", "match_type": "EXACT"}],
+            "exempt_policy_violations": ["HEALTH_IN_PERSONALIZED_ADS"],
+        }
+
+        write._apply_add_keywords(_keyword_client(service), "1234567890", changes)
+
+        assert list(service.applied_operations[0].exempt_policy_violation_keys) == []
+
+    def test_apply_without_exemptions_skips_the_probe(self):
+        service = _FakeCriterionService()
+        changes = {
+            "ad_group_id": "2002",
+            "keywords": [{"text": "emdr near me", "match_type": "EXACT"}],
+        }
+
+        write._apply_add_keywords(_keyword_client(service), "1234567890", changes)
+
+        assert service.validate_requests == []
+
+    def test_exempted_plan_passes_the_dry_run(self, apply_config, monkeypatch):
+        """End to end: the probe finds the violation and attaches the key;
+        the dry run's validate-only request then carries the key and passes."""
+        policy_error = _policy_exception([(0, "HEALTH_IN_PERSONALIZED_ADS", True)])
+        service = _FakeCriterionService()
+
+        def mutate(request=None, customer_id=None, operations=None):
+            service.validate_requests.append(request)
+            if not list(request["operations"][0].exempt_policy_violation_keys):
+                raise policy_error
+            return SimpleNamespace(results=[])
+
+        service.mutate_ad_group_criteria = mutate
+        monkeypatch.setattr(
+            "adloop.ads.client.get_ads_client", lambda _cfg: _keyword_client(service)
+        )
+        plan_id = _stage_keywords_plan(exempt_policy_violations=["HEALTH_IN_PERSONALIZED_ADS"])
+
+        result = write.confirm_and_apply(apply_config, plan_id=plan_id, dry_run=True)
+
+        assert result["status"] == "DRY_RUN_SUCCESS"
+        assert len(service.validate_requests) == 2
+        assert all(r["validate_only"] for r in service.validate_requests)
+
+
+def test_extract_error_message_reads_proto_plus_failures():
+    message = write._extract_error_message(
+        _policy_exception([(0, "HEALTH_IN_PERSONALIZED_ADS", True)])
+    )
+
+    assert message == (
+        "[policy_violation_error=POLICY_ERROR] A policy was violated. "
+        "(trigger: keyword 0) [request_id=req-1]"
+    )

@@ -172,9 +172,11 @@ class TestCrossTenantConfirmBlocked:
     """The attack the tenant-scoped plan store exists to prevent: tenant B
     obtaining tenant A's plan_id and applying A's pending mutation."""
 
-    def test_confirm_and_apply_rejects_foreign_plan(self, tmp_path):
+    def test_confirm_and_apply_rejects_foreign_plan(self, tmp_path, monkeypatch):
         from adloop.ads import write
         from adloop.config import SafetyConfig
+
+        monkeypatch.setattr(write, "_validate_with_google", lambda *_: None)
 
         def _cfg():
             return AdLoopConfig(

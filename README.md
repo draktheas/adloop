@@ -256,7 +256,7 @@ AdLoop includes pre-built slash commands in `.claude/commands/` for common workf
 AdLoop manages real ad spend, so safety is not optional.
 
 - **Two-step writes.** Every mutation returns a preview first. A separate `confirm_and_apply` call is required to execute.
-- **Dry-run by default.** Even `confirm_and_apply` defaults to `dry_run=true`. Real changes require explicit `dry_run=false`.
+- **Dry-run by default.** Even `confirm_and_apply` defaults to `dry_run=true`. Real changes require explicit `dry_run=false`. A Google Ads dry run sends the change to Google as validate-only, so policy and validation errors surface before anything changes.
 - **Two-phase apply (optional).** With `safety.two_phase_apply: true`, `confirm_and_apply` refuses `dry_run=false` until the plan has completed one dry-run pass — preview-then-apply becomes server-enforced instead of a convention.
 - **Budget caps.** Configurable maximum daily budget — the server rejects anything above the cap.
 - **Audit log.** Every operation (including dry runs) is logged to `~/.adloop/audit.log`.

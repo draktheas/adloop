@@ -196,7 +196,7 @@ Reddit is a second ad platform with its own connection (own OAuth app, no develo
 | `draft_structured_snippets` | Create structured snippet assets for a campaign (does NOT publish) | `campaign_id`, `snippets` list of `{header, values}` with official header values and 3-10 values |
 | `draft_image_assets` | Create image assets for a campaign from local files (does NOT publish) | `campaign_id`, `image_paths` list of local PNG/JPEG/GIF files |
 | `draft_sitelinks` | Create sitelink extensions for a campaign (does NOT publish) | `campaign_id`, `sitelinks` list of {link_text ≤25 chars, final_url, description1 ≤35 chars, description2 ≤35 chars} |
-| `draft_keywords` | Propose keyword additions (does NOT add) | Each keyword needs `text` and `match_type` (EXACT/PHRASE/BROAD) |
+| `draft_keywords` | Propose keyword additions (does NOT add) | Each keyword needs `text` and `match_type` (EXACT/PHRASE/BROAD); optional `exempt_policy_violations` (policy names) requests a Google policy exemption, only with the user's approval |
 | `add_negative_keywords` | Propose negative keywords directly on a campaign (does NOT add) | `campaign_id`, keyword list, `match_type` |
 | `add_negative_locations` | Propose negative geo exclusions on a campaign (does NOT add) — exclude cities/regions while keeping broader positive targets | `campaign_id`, `geo_target_ids` (numeric geo target constant IDs) |
 | `draft_key_event` | Mark a GA4 event as a key event/conversion (does NOT apply) — closes the tracking loop after attribution_check finds an untracked conversion | `event_name`, `counting_method` (ONCE_PER_EVENT for purchases / ONCE_PER_SESSION for sign-ups), `property_id` (falls back to config) |
@@ -231,7 +231,7 @@ Same draft → preview → `confirm_and_apply` gate; the plan carries `platform:
 **Write tool workflow:**
 1. Call a `draft_*` tool → returns a preview with a `plan_id`
 2. Show the full preview to the user and wait for approval
-3. Call `confirm_and_apply(plan_id=..., dry_run=true)` first to test
+3. Call `confirm_and_apply(plan_id=..., dry_run=true)` first to test. For Google Ads this sends the change to Google as validate-only, so policy and validation errors come back as `DRY_RUN_FAILED` without changing anything (multi-step plans validate their first request; GA4 key-event plans are not checked)
 4. Only call with `dry_run=false` after explicit user confirmation
 
 **Safety behaviors:**
@@ -247,6 +247,7 @@ Same draft → preview → `confirm_and_apply` gate; the plan carries `platform:
 - `require_dry_run: true` in config overrides `dry_run=false` — the user must change the config to allow real mutations.
 - `two_phase_apply: true` in config (always on for AdLoop Cloud) refuses `dry_run=false` with status `DRY_RUN_REQUIRED` until that plan_id has completed one `dry_run=true` pass. Run the dry run, show the user, then apply — do not retry `dry_run=false` in a loop.
 - All operations (including dry runs) are logged to `~/.adloop/audit.log`.
+- **Policy violations.** A dry run or apply that Google rejects on policy returns `policy_violations` (policy name, trigger, `exemptible`). Health terms (EMDR, therapy, PTSD, ...) commonly hit `HEALTH_IN_PERSONALIZED_ADS`, which Google marks exemptible: an exempted keyword still serves on Search, just not in personalized ads. Explain the policy to the user and ask; only with their explicit approval, re-draft with `draft_keywords(..., exempt_policy_violations=["HEALTH_IN_PERSONALIZED_ADS"])` and dry-run again. Never request an exemption the user didn't approve. Other write tools can't request exemptions yet; point the user to the Google Ads UI.
 
 ## Safety Rules (CRITICAL — always follow)
 

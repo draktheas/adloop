@@ -714,8 +714,14 @@ def draft_keywords(
     customer_id: str = "",
     ad_group_id: str = "",
     keywords: list[dict] | None = None,
+    exempt_policy_violations: list[str] | None = None,
 ) -> dict:
-    """Draft keyword additions with match types — returns preview."""
+    """Draft keyword additions with match types — returns preview.
+
+    exempt_policy_violations: Google policy names (e.g.
+    "HEALTH_IN_PERSONALIZED_ADS") to request an exemption for when Google
+    flags them as exemptible. Only set after the user approved it.
+    """
     from adloop.safety.guards import SafetyViolation, check_blocked_operation
     from adloop.safety.preview import ChangePlan, store_plan
 
@@ -725,21 +731,31 @@ def draft_keywords(
         return {"error": str(e)}
 
     keywords = keywords or []
+    exempt = sorted(
+        {p.strip().upper() for p in exempt_policy_violations or [] if p.strip()}
+    )
 
     errors = _validate_keywords(ad_group_id, keywords)
     if errors:
         return {"error": "Validation failed", "details": errors}
 
     warnings = _check_broad_match_safety(config, customer_id, ad_group_id, keywords)
+    if exempt:
+        warnings.append(
+            "This plan requests a Google policy exemption for "
+            f"{', '.join(exempt)}. Google reviews exemption requests; confirm "
+            "the user approved requesting it."
+        )
+
+    changes: dict = {"ad_group_id": ad_group_id, "keywords": keywords}
+    if exempt:
+        changes["exempt_policy_violations"] = exempt
 
     plan = ChangePlan(
         operation="add_keywords",
         entity_type="keyword",
         customer_id=customer_id,
-        changes={
-            "ad_group_id": ad_group_id,
-            "keywords": keywords,
-        },
+        changes=changes,
     )
     store_plan(plan)
     preview = plan.to_preview()
@@ -1958,7 +1974,14 @@ def _extract_error_message(exc: Exception) -> str:
             parts = []
             for error in exc.failure.errors:
                 error_code = error.error_code
-                code_field = error_code.WhichOneof("error_code")
+                # proto-plus messages (the client's default) hide WhichOneof
+                # on the underlying protobuf.
+                raw = (
+                    type(error_code).pb(error_code)
+                    if hasattr(type(error_code), "pb")
+                    else error_code
+                )
+                code_field = raw.WhichOneof("error_code")
                 code_value = getattr(error_code, code_field) if code_field else "UNKNOWN"
                 line = f"[{code_field}={code_value.name if hasattr(code_value, 'name') else code_value}]"
                 if error.message:
@@ -1976,6 +1999,136 @@ def _extract_error_message(exc: Exception) -> str:
 
     fallback = str(exc)
     return fallback if fallback else repr(exc)
+
+
+def _policy_violations(exc: Exception) -> list[dict]:
+    """List the policy violations in a Google Ads exception, if any."""
+    try:
+        from google.ads.googleads.errors import GoogleAdsException
+    except ImportError:
+        return []
+    if not isinstance(exc, GoogleAdsException) or not exc.failure:
+        return []
+
+    violations = []
+    for error in exc.failure.errors:
+        details = error.details.policy_violation_details
+        if not details.key.policy_name:
+            continue
+        violations.append({
+            "trigger": error.trigger.string_value,
+            "policy_name": details.key.policy_name,
+            "policy": details.external_policy_name,
+            "description": details.external_policy_description,
+            "exemptible": bool(details.is_exemptible),
+        })
+    return violations
+
+
+# Operations whose plan supports requesting a policy exemption.
+_EXEMPTION_OPERATIONS = {"add_keywords"}
+
+
+def _policy_failure_details(exc: Exception, operation: str) -> dict:
+    """Structured policy details for a failed dry run or apply."""
+    violations = _policy_violations(exc)
+    if not violations:
+        return {}
+    details: dict = {"policy_violations": violations}
+    exemptible = sorted({v["policy_name"] for v in violations if v["exemptible"]})
+    if exemptible and operation in _EXEMPTION_OPERATIONS:
+        details["hint"] = (
+            f"Google allows an exemption request for {', '.join(exemptible)}. "
+            "Show the user the policy and ask. Only with their explicit "
+            "approval, draft again with "
+            f"exempt_policy_violations={exemptible}."
+        )
+    elif exemptible:
+        details["hint"] = (
+            f"Google allows an exemption request for {', '.join(exemptible)}, "
+            "but AdLoop can't request one for this operation. The user can "
+            "make the change in the Google Ads UI and request it there."
+        )
+    return details
+
+
+class _ValidationPassed(BaseException):
+    """Google accepted a validate-only request.
+
+    Raised to stop the handler before it reads the (empty) validate-only
+    response. A BaseException so the handlers' ``except Exception`` blocks,
+    which turn failures into partial-failure results, let it through.
+    """
+
+
+class _ValidateOnlyService:
+    """Service proxy that sends every mutate as validate-only.
+
+    A handler's own validate-only probe (a request that already sets
+    ``validate_only``) passes through and returns Google's response.
+    """
+
+    def __init__(self, service: object):
+        self._service = service
+
+    def __getattr__(self, name: str) -> object:
+        attr = getattr(self._service, name)
+        if not name.startswith("mutate") or not callable(attr):
+            return attr
+
+        def validate(request: object = None, **kwargs: object) -> object:
+            if request is None:
+                request = {**kwargs, "validate_only": True}
+                probe = False
+            elif isinstance(request, dict):
+                probe = bool(request.get("validate_only"))
+                request = {**request, "validate_only": True}
+            else:
+                probe = bool(request.validate_only)
+                request.validate_only = True
+            response = attr(request=request)
+            if probe:
+                return response
+            raise _ValidationPassed
+
+        return validate
+
+
+class _ValidateOnlyClient:
+    """GoogleAdsClient proxy whose services only validate mutations."""
+
+    def __init__(self, client: object):
+        self._client = client
+
+    def get_service(self, *args: object, **kwargs: object) -> _ValidateOnlyService:
+        return _ValidateOnlyService(self._client.get_service(*args, **kwargs))
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._client, name)
+
+
+# Handlers that chain dependent requests: validate-only returns no resource
+# names, so only their first request can be validated.
+_MULTI_STEP_OPERATIONS = {"create_negative_keyword_list"}
+
+
+def _validate_with_google(config: AdLoopConfig, plan: object) -> dict | None:
+    """Send the plan to Google Ads as validate-only.
+
+    Returns None when Google accepts it, else a dict describing the failure.
+    """
+    try:
+        result = _execute_plan(config, plan, validate_only=True)
+    except _ValidationPassed:
+        return None
+    except Exception as exc:
+        return {
+            "error": _extract_error_message(exc),
+            **_policy_failure_details(exc, plan.operation),
+        }
+    if isinstance(result, dict) and result.get("partial_failure"):
+        return {"error": result.get("error") or "Google Ads rejected the change."}
+    return None
 
 
 def confirm_and_apply(
@@ -2008,6 +2161,33 @@ def confirm_and_apply(
 
     if dry_run:
         preflight_checks: dict | None = None
+        # GA4 has no validate-only mode, so key-event plans are not checked.
+        validated_with_google = not is_reddit and plan.operation != "create_key_event"
+        if validated_with_google:
+            failure = _validate_with_google(config, plan)
+            if failure is not None:
+                log_mutation(
+                    config.safety.log_file,
+                    operation=plan.operation,
+                    customer_id=plan.customer_id,
+                    entity_type=plan.entity_type,
+                    entity_id=plan.entity_id,
+                    changes=plan.changes,
+                    dry_run=True,
+                    result="dry_run_failed",
+                    error=failure["error"],
+                )
+                return {
+                    "status": "DRY_RUN_FAILED",
+                    "plan_id": plan.plan_id,
+                    "operation": plan.operation,
+                    **failure,
+                    "message": (
+                        "Google Ads rejected the change in validate-only mode; "
+                        "nothing was changed. The real apply would fail the "
+                        "same way."
+                    ),
+                }
         if is_reddit:
             # Reddit has no validate-only mode; the dry run re-reads the
             # target and re-runs the safety caps against live values. A
@@ -2102,6 +2282,19 @@ def confirm_and_apply(
                 "account. To apply for real, call confirm_and_apply again with "
                 "dry_run=false."
             )
+        if validated_with_google:
+            response["validated_with_google"] = True
+            if plan.operation in _MULTI_STEP_OPERATIONS:
+                response["note"] = (
+                    "Google validated the first request only: the later steps "
+                    "depend on IDs the first step creates."
+                )
+        elif not is_reddit:
+            response["validated_with_google"] = False
+            response["note"] = (
+                "GA4 has no validate-only mode: this dry run did not check "
+                "the change with Google."
+            )
         return response
 
     if config.safety.two_phase_apply and plan.dry_run_result is None:
@@ -2146,7 +2339,11 @@ def confirm_and_apply(
             result="error",
             error=error_message,
         )
-        return {"error": error_message, "plan_id": plan.plan_id}
+        return {
+            "error": error_message,
+            "plan_id": plan.plan_id,
+            **_policy_failure_details(e, plan.operation),
+        }
 
     log_mutation(
         config.safety.log_file,
@@ -2851,8 +3048,14 @@ def _extract_resource_name(resp: object) -> str:
     return ""
 
 
-def _execute_plan(config: AdLoopConfig, plan: object) -> dict:
-    """Dispatch to the right API call based on plan.operation."""
+def _execute_plan(
+    config: AdLoopConfig, plan: object, *, validate_only: bool = False
+) -> dict:
+    """Dispatch to the right API call based on plan.operation.
+
+    With ``validate_only`` the Google Ads mutate requests are only
+    validated, and ``_ValidationPassed`` is raised once Google accepts one.
+    """
     from adloop.ads.client import get_ads_client, normalize_customer_id
 
     # Reddit plans have their own executors and never touch Google: the
@@ -2871,6 +3074,8 @@ def _execute_plan(config: AdLoopConfig, plan: object) -> dict:
         return _apply_create_key_event(config, plan.changes)
 
     client = get_ads_client(config)
+    if validate_only:
+        client = _ValidateOnlyClient(client)
     cid = normalize_customer_id(plan.customer_id)
 
     # Conversion-action CRUD lives in its own module; import lazily so the
@@ -3430,10 +3635,54 @@ def _apply_add_keywords(client: object, cid: str, changes: dict) -> dict:
         )
         operations.append(operation)
 
+    exempt = set(changes.get("exempt_policy_violations") or [])
+    if exempt:
+        _attach_policy_exemptions(service, cid, operations, exempt)
+
     response = service.mutate_ad_group_criteria(
         customer_id=cid, operations=operations
     )
     return {"resource_names": [r.resource_name for r in response.results]}
+
+
+def _attach_policy_exemptions(
+    service: object, cid: str, operations: list, allowed: set[str]
+) -> None:
+    """Request exemptions for the approved, exemptible policy violations.
+
+    Asks Google (validate-only) which policies the keywords violate and
+    attaches the exact violation keys Google returns, for the approved
+    policies only. Anything else stays unexempted, so the real request
+    still fails on it.
+    """
+    from google.ads.googleads.errors import GoogleAdsException
+
+    try:
+        service.mutate_ad_group_criteria(
+            request={
+                "customer_id": cid,
+                "operations": operations,
+                "validate_only": True,
+            }
+        )
+        return
+    except GoogleAdsException as exc:
+        failure = exc.failure
+
+    for error in failure.errors:
+        details = error.details.policy_violation_details
+        if not details.is_exemptible or details.key.policy_name not in allowed:
+            continue
+        index = next(
+            (
+                element.index
+                for element in error.location.field_path_elements
+                if element.field_name == "operations"
+            ),
+            None,
+        )
+        if index is not None:
+            operations[index].exempt_policy_violation_keys.append(details.key)
 
 
 def _apply_add_negative_keywords(client: object, cid: str, changes: dict) -> dict:

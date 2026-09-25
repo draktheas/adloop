@@ -35,15 +35,20 @@ class _FakeAdService:
     def __init__(self) -> None:
         self.captured_operations: list[object] | None = None
         self.captured_customer_id: str | None = None
+        self.validate_only_requests: list[dict] = []
 
     def ad_path(self, customer_id: str, ad_id: str) -> str:
         return f"customers/{customer_id}/ads/{ad_id}"
 
     def mutate_ads(
         self,
-        customer_id: str,
-        operations: list[object],
+        customer_id: str | None = None,
+        operations: list[object] | None = None,
+        request: dict | None = None,
     ) -> object:
+        if request is not None:
+            self.validate_only_requests.append(request)
+            return SimpleNamespace(results=[])
         self.captured_operations = operations
         self.captured_customer_id = customer_id
         first_op = operations[0]
@@ -599,7 +604,14 @@ class TestApply:
 
 
 class TestConfirmAndApplyIntegration:
-    def test_dry_run_returns_dry_run_success(self, config):
+    @pytest.fixture(autouse=True)
+    def ad_service(self, monkeypatch) -> _FakeAdService:
+        service = _FakeAdService()
+        client = _FakeClient(service)
+        monkeypatch.setattr("adloop.ads.client.get_ads_client", lambda _cfg: client)
+        return service
+
+    def test_dry_run_returns_dry_run_success(self, config, ad_service):
         draft = write.update_responsive_search_ad(
             config,
             customer_id="1234567890",
@@ -611,6 +623,10 @@ class TestConfirmAndApplyIntegration:
         )
         assert result["status"] == "DRY_RUN_SUCCESS"
         assert result["operation"] == "update_responsive_search_ad"
+        assert result["validated_with_google"] is True
+        assert [r["validate_only"] for r in ad_service.validate_only_requests] == [True]
+        # Validation must never reach the real mutate path.
+        assert ad_service.captured_operations is None
 
     def test_require_dry_run_overrides_dry_run_false(self, dry_run_config):
         draft = write.update_responsive_search_ad(
